@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "version": "1.1.1",
+  "testedOn": "2026-09-06",
+  "platform": "Windows 11 Pro 23H2 x64, build 22631.6199",
+  "unicodeVersion": "17.0",
+  "coverageCounts": {
+    "total": 5760,
+    "apple": 5371,
+    "native": 6,
+    "missing": 12,
+    "textPreserved": 371,
+    "rgiTotal": 3953,
+    "rgiMissing": 0
+  },
+  "fontChecks": {
+    "inputSequenceAudit": "passed",
+    "appleBitmapSizesRepaired": 693,
+    "textOutlinesCopied": 371,
+    "sequenceRegression": "passed",
+    "textPresentation": "passed",
+    "fontStructure": "passed",
+    "glyphCount": 6768,
+    "bitmapSizes": [
+      20,
+      26,
+      32,
+      40,
+      48,
+      52,
+      56,
+      64,
+      72,
+      80,
+      88,
+      96
+    ],
+    "indexedMetrics": "passed",
+    "nativeRenderSmoke": "passed",
+    "nativeRenderedSequenceCount": 5748,
+    "nativeMatchingSequenceCount": 5745,
+    "nativeSequenceRegression": "warning"
+  },
+  "tests": {
+    "pythonPassed": 7,
+    "pythonSkipped": 0,
+    "powershell51SuitesPassed": [
+      "Test-Bootstrap",
+      "Test-ResourceFailures",
+      "Test-SystemTransaction",
+      "Test-UiTransactionStatus"
+    ]
+  },
+  "systemTransaction": {
+    "originalBackupVerified": true,
+    "bootReplacementApplied": true,
+    "installedFontMatchesCandidate": true,
+    "originalOwnerAndDaclRestored": true,
+    "unrelatedPendingOperationsPreserved": true
+  },
+  "postBootDisplay": {
+    "status": "passed_with_warnings",
+    "strings": 12,
+    "sizes": [
+      16,
+      32,
+      64
+    ],
+    "images": 36,
+    "renderer": "DirectWrite/Direct2D system collection",
+    "warnings": [
+      "地区旗显示为黑旗：england",
+      "地区旗显示为黑旗：scotland",
+      "地区旗显示为黑旗：wales"
+    ]
+  },
+  "notYetVerified": [
+    "Manual per-application inspection in Edge, Notepad and emoji-panel input",
+    "Real restore-to-native transaction followed by another reboot"
+  ],
+  "note": "Public summary only. Per-machine paths, account identifiers and backup records are intentionally omitted."
+}

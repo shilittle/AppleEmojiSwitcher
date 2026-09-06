@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "font": {
+    "url": "https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Windows.ttf",
+    "sha256": "18e48f1785564fbf511241e0963b265057bfe742036d8543406c6ce07e48ec0b",
+    "size": 256391076,
+    "filename": "AppleColorEmoji-Windows.ttf",
+    "version": "macos-26-20260722-484daf4e"
+  },
+  "runtime": {
+    "url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-amd64.zip",
+    "sha256": "d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf",
+    "size": 11009825,
+    "filename": "python-3.13.15-embed-amd64.zip",
+    "version": "3.13.15"
+  },
+  "wheels": [
+    {
+      "url": "https://files.pythonhosted.org/packages/82/f8/7188153c4b265c899cd035de6a062677d51f67118a4ba640902bd9683e90/fonttools-4.64.0-py3-none-any.whl",
+      "sha256": "4a05783ff54ce4c7a28f18e5772efdf63c219374bd9ffc55452182e1cef8be60",
+      "size": 1195327,
+      "filename": "fonttools-4.64.0-py3-none-any.whl",
+      "version": "4.64.0"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/e3/c9/37cf8d1cfb45696bb88ee65805910d5f2d4784d6bd196a755ed3a305c40f/uharfbuzz-0.56.1-cp310-abi3-win_amd64.whl",
+      "sha256": "ee99ae2389d4f8c5651962d65bf8fe9296c781598e3f697ba26d51c4b20527f9",
+      "size": 1454583,
+      "filename": "uharfbuzz-0.56.1-cp310-abi3-win_amd64.whl",
+      "version": "0.56.1"
+    },
+    {
+      "url": "https://files.pythonhosted.org/packages/a6/9b/7a58e61d62be561da3a356fe2384d4059a6345fc130e23ef1c36a5b81d24/pillow-12.3.0-cp313-cp313-win_amd64.whl",
+      "sha256": "1cca606cd25738df4ed873d5ad46bbdb3d83b5cbca291f6b4ff13a4df6b0bbe8",
+      "size": 7239691,
+      "filename": "pillow-12.3.0-cp313-cp313-win_amd64.whl",
+      "version": "12.3.0"
+    }
+  ],
+  "unicode": [
+    {
+      "url": "https://unicode.org/Public/17.0.0/emoji/emoji-test.txt",
+      "sha256": "1d8a944f88d7952f7ef7c5167fef3c67995bcae24543949710231b03a201acda",
+      "size": 669326,
+      "filename": "emoji-test.txt"
+    },
+    {
+      "url": "https://unicode.org/Public/17.0.0/emoji/emoji-sequences.txt",
+      "sha256": "12cc8267dc33cbd11ed32bcf6fc5dc2ad9c7a77bae1bdfba2f41b1b9b3ead8dd",
+      "size": 194868,
+      "filename": "emoji-sequences.txt"
+    },
+    {
+      "url": "https://unicode.org/Public/17.0.0/emoji/emoji-zwj-sequences.txt",
+      "sha256": "5b25441daed2322b068c5e70cda522946a4f0274df864445a1965a92e5fc5cad",
+      "size": 277215,
+      "filename": "emoji-zwj-sequences.txt"
+    },
+    {
+      "url": "https://unicode.org/Public/17.0.0/ucd/emoji/emoji-variation-sequences.txt",
+      "sha256": "bb3d09ef03f206012c7532dd52dc0a21c9efddba0135ea4cf0d9201b8b9bba7e",
+      "size": 38315,
+      "filename": "emoji-variation-sequences.txt"
+    }
+  ]
+}
