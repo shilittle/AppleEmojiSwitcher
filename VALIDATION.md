@@ -1,8 +1,24 @@
 # 验证报告
 
-本报告记录 v1.1.1 预览版的构建、真实重启替换和本机显示结果。恢复原生后的再次重启、应用人工核对仍未完成，因此不能把本版称为完整兼容。
+本报告记录 v1.2.0 预览版测试，并保留 v1.1.1 完整字体的实机证据。CLI 原版字体尚未执行真实重启安装和恢复；它的 `verify` 只检查文件、备份和权限，不代表绘制验收。
 
-## 覆盖结果
+## v1.2.0 CLI 与共享代码
+
+- Windows PowerShell 5.1 六组测试：`Test-Common`、`Test-Bootstrap`、`Test-ResourceFailures`、`Test-SystemTransaction`、`Test-UiTransactionStatus`、`Test-Cli`。
+- CLI 隔离测试覆盖中文菜单、全部命令、退出码 `0/3010/1223/1`、模拟拒绝提权、独立提权结果文件、具体错误保留，以及完整模式下重复安装不下载资源。
+- 共享资源测试覆盖准确 SHA-256 和大小、损坏缓存、下载中断、锁等待取消，以及两个独立 PowerShell 进程并发访问缓存。
+- 隔离事务测试覆盖极简安装、重复操作、取消、恢复、旧 GUI 备份兼容、权限检查和其他待重启操作保留。测试后端模拟系统文件、队列和启动收尾，不修改 Windows 字体。
+- `Test-Packages.py` 检查 CLI 的 10 文件清单、64 KiB 上限、裁剪锁文件、压缩包清单哈希、可重复打包，以及两版共享代码逐字节一致。CLI 不含 WPF、Python、wheel、Unicode 数据、字体构建器或渲染组件。
+- 本机使用 CLI `status`、`verify` 做只读验收，识别目前已生效的完整字体；系统字体、权限及已有待重启队列保持不变。含中文、空格和 `!` 的便携路径已测试。
+- 原有字体构建回归测试 7 项通过，无跳过。
+
+CLI 的真实 UAC 拒绝、原版字体重启替换及重启恢复尚未实机测试；对应流程只完成隔离测试。当前电脑保留完整字体，因此两种模式的真实切换也尚未验证。
+
+## v1.1.1 完整字体实机记录
+
+以下覆盖及绘制数据来自完整模式，不能用于描述 CLI 未加工的原版字体。
+
+### 覆盖结果
 
 检查基于 Unicode Emoji 17.0 的完整字符串，包含肤色、国旗、键帽、性别和 ZWJ 组合。
 
@@ -19,7 +35,7 @@
 
 实际绘制检查共 5748 项，其中 5745 项与成形结果一致；3 项地区旗在本机布局阶段退回黑旗，按兼容性策略记为警告。字体结构、索引度量、文字呈现、资源哈希和备份检查仍是硬性条件。
 
-## 已执行测试
+### 已执行测试
 
 - Python 字体构建回归测试：7 项通过。
 - Windows PowerShell 5.1 资源、系统事务和界面状态测试：通过。
@@ -30,11 +46,11 @@
 
 机器可读摘要见 [`docs/validation-summary.json`](docs/validation-summary.json)。每次运行的完整覆盖和绘制记录由工具保存在使用者本机。
 
-在仓库根目录使用 Windows PowerShell 5.1 运行 `tests/Test-Bootstrap.ps1`、`tests/Test-ResourceFailures.ps1`、`tests/Test-SystemTransaction.ps1`、`tests/Test-UiTransactionStatus.ps1`。字体测试使用带有锁定依赖的私有 Python 执行 `python -I -B tests/Test-FontBuilder.py`；其中一个集成案例需要固定 Apple 缓存和对应的原生字体，资源不存在时会跳过。可用 `AES_TEST_APPLE_FONT` 与 `AES_TEST_WINDOWS_FONT` 指定这两个只读测试输入。
+在仓库根目录使用 Windows PowerShell 5.1 运行上述六个 `tests/Test-*.ps1` 脚本，使用 Python 运行 `tests/Test-Packages.py`。字体测试使用带有锁定依赖的私有 Python 执行 `python -I -B tests/Test-FontBuilder.py`；其中一个集成案例需要固定 Apple 缓存和对应的原生字体，资源不存在时会跳过。可用 `AES_TEST_APPLE_FONT` 与 `AES_TEST_WINDOWS_FONT` 指定这两个只读测试输入。开发测试所需的 Python 不属于 CLI 包或 CLI 运行流程。
 
 ## 当前限制
 
-真实重启替换和权限恢复已经完成。以下项目仍待实机验证：
+完整模式的真实重启替换和权限恢复已经完成。以下项目仍待实机验证：
 
 - 在 Edge、记事本和 Win＋句号输入面板中的人工逐项显示；
 - 从 Apple Emoji 恢复到原生字体的完整流程；

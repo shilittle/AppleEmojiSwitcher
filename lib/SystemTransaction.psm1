@@ -1,4 +1,4 @@
-Set-StrictMode -Version 2.0
+﻿Set-StrictMode -Version 2.0
 
 # This module has one deliberately narrow responsibility: atomically prepare a
 # boot-time replacement of the single Windows emoji font, while retaining an
@@ -6,6 +6,7 @@ Set-StrictMode -Version 2.0
 
 $script:AesKnownLocalReferenceHash = '12c5253251f45c57fa57e2a1c748f821d3ca030a3e757e049a5da6316f213bcb'
 $script:AesExpectedAppleSourceHash = '18e48f1785564fbf511241e0963b265057bfe742036d8543406c6ce07e48ec0b'
+$script:AesExpectedAppleSourceSize = [int64]256391076
 $script:AesFontValueName = 'Segoe UI Emoji (TrueType)'
 $script:AesMutexName = 'Global\AppleEmojiSwitcher.SystemTransaction.v1'
 $script:AesTestBackend = $null
@@ -243,6 +244,12 @@ function Get-AesHash {
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+}
+
+function Get-AesFileSize {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    return [int64]([System.IO.FileInfo]$Path).Length
 }
 
 function Invoke-AesCopy {
@@ -592,6 +599,74 @@ function Test-AesBackupMetadata {
     return @{ Exists = $true; Valid = $true; Metadata = $metadata; Reason = '' }
 }
 
+function Get-AesInstallationMode {
+    # Version 1 transaction records predate InstallationMode.  Their output
+    # hashes remain authoritative: only the exact pinned release is Pinned;
+    # every other recorded replacement is the verified built font.
+    param($Record, [string]$FallbackHash = '', [string]$Status = '')
+    $declared = [string](Get-AesMemberValue $Record 'installationMode')
+    if ($declared -in @('Original', 'Built', 'Pinned', 'Unknown')) { return $declared }
+    if ($Status -in @('Original', 'OriginalWithBackup')) { return 'Original' }
+    $hash = $FallbackHash
+    if ($hash -notmatch '^[a-fA-F0-9]{64}$') {
+        foreach ($name in @('installedOutputHash', 'pendingOutputHash', 'outputHash')) {
+            $candidate = [string](Get-AesMemberValue $Record $name)
+            if ($candidate -match '^[a-fA-F0-9]{64}$') { $hash = $candidate; break }
+        }
+    }
+    if ($hash -match '^[a-fA-F0-9]{64}$') {
+        if ($hash.ToLowerInvariant() -eq $script:AesExpectedAppleSourceHash) { return 'Pinned' }
+        return 'Built'
+    }
+    return 'Unknown'
+}
+
+function Test-AesPinnedAppleAsset {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $size = Get-AesFileSize $Path
+    if ($size -ne $script:AesExpectedAppleSourceSize) {
+        throw "Pinned Apple font has an unexpected size ($size bytes)."
+    }
+    $hash = Get-AesHash $Path
+    if ($hash -ne $script:AesExpectedAppleSourceHash) {
+        throw 'Pinned Apple font does not match the approved release SHA-256.'
+    }
+    return $hash
+}
+
+function Test-AesFinalizerRegistered {
+    param([string]$TaskName)
+    if ([string]::IsNullOrWhiteSpace($TaskName)) { return $false }
+    if ($TaskName -notmatch '^\\AppleEmojiSwitcher-Finalize-[a-f0-9]{32}$') { return $true }
+    $hook = Get-AesMemberValue $script:AesTestBackend 'IsFinalizerRegistered'
+    if ($null -ne $hook) { return [bool](& $hook $TaskName) }
+    # Query the scheduler directly: in Windows PowerShell 5.1, schtasks stderr
+    # becomes a terminating error under ErrorActionPreference=Stop even when
+    # redirected. Only a missing task means completed cleanup; access/service
+    # errors must remain verification failures.
+    $service = $null; $folder = $null; $task = $null
+    try {
+        $service = New-Object -ComObject 'Schedule.Service'
+        $service.Connect()
+        $folder = $service.GetFolder('\')
+        try { $task = $folder.GetTask($TaskName); return $true }
+        catch {
+            $errorItem = $_.Exception
+            while ($null -ne $errorItem) {
+                if ($errorItem.HResult -eq -2147024894) { return $false } # HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+                $errorItem = $errorItem.InnerException
+            }
+            throw
+        }
+    } finally {
+        foreach ($comObject in @($task, $folder, $service)) {
+            if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject)
+            }
+        }
+    }
+}
+
 function New-AesBaseState {
     param([hashtable]$Environment, [string]$Status = 'Unknown', [string]$Reason = '')
     $support = Test-AesSupported $Environment
@@ -604,7 +679,8 @@ function New-AesBaseState {
         Status = $Status; CurrentFont = $Environment.TargetPath; CurrentHash = $currentHash
         OriginalFont = if ($backup.Exists) { $paths.BackupFont } else { $Environment.TargetPath }
         BackupExists = [bool]$backup.Exists; BackupPath = if ($backup.Exists) { $paths.BackupFont } else { $null }
-        RenderVerificationPending = $false; RestartRequired = $false; Operation = $null; Message = $Reason
+        InstallationMode = 'Unknown'; RenderVerificationPending = $false; RestartRequired = $false; Operation = $null; Message = $Reason
+        VerificationPassed = $false; VerificationReason = ''
     }
 }
 
@@ -626,16 +702,23 @@ function Get-AesSystemState {
             if ($stage -and $target -and (Test-AesOwnedPath $stage $paths.Root) -and $target.Equals($environment.TargetPath, [StringComparison]::OrdinalIgnoreCase) -and (Test-AesPendingPair (Get-AesPendingEntries) $stage $target)) {
                 $state.Status = [string](Get-AesMemberValue $journal 'status' 'PendingInstall')
                 $state.RestartRequired = $true
+                $state.Operation = [string](Get-AesMemberValue $journal 'operation')
+                $state.InstallationMode = Get-AesInstallationMode $journal '' $state.Status
                 return $state
             }
             $queuedOutput = [string](Get-AesMemberValue $journal 'pendingOutputHash')
             if (-not $queuedOutput) { $queuedOutput = [string](Get-AesMemberValue $journal 'outputHash') }
             if ($queuedOutput -match '^[a-fA-F0-9]{64}$' -and $state.CurrentHash -eq $queuedOutput.ToLowerInvariant()) {
-                if ([string](Get-AesMemberValue $journal 'operation') -eq 'Restore') { $state.Status = 'Original'; $state.Reason = 'Restored font bytes were verified after restart.' }
-                else { $state.Status = 'Installed'; $state.Reason = 'Replacement font bytes were verified after restart.'; $state.RenderVerificationPending = $true }
+                if ([string](Get-AesMemberValue $journal 'operation') -eq 'Restore') {
+                    $state.Status = 'Original'; $state.Reason = 'Restored font bytes were verified after restart.'; $state.InstallationMode = 'Original'
+                } else {
+                    $state.Status = 'Installed'; $state.Reason = 'Replacement font bytes were verified after restart.'
+                    $state.InstallationMode = Get-AesInstallationMode $journal $queuedOutput 'Installed'
+                    $state.RenderVerificationPending = ($state.InstallationMode -eq 'Built')
+                }
                 return $state
             }
-            if ($originalHash -and $state.CurrentHash -eq $originalHash.ToLowerInvariant()) { $state.Status = 'NotApplied'; $state.Reason = 'The queued operation was not applied at restart.'; return $state }
+            if ($originalHash -and $state.CurrentHash -eq $originalHash.ToLowerInvariant()) { $state.Status = 'NotApplied'; $state.Reason = 'The queued operation was not applied at restart.'; $state.InstallationMode = 'Original'; return $state }
             $state.Status = 'InterruptedTransaction'; $state.Reason = 'Transaction journal exists but its exact boot operation is not queued.'; return $state
         }
         if ($null -ne $journal -and [bool](Get-AesMemberValue $journal '__AesCorrupt' $false)) { $state.Status = 'InterruptedTransaction'; $state.Reason = 'Transaction journal is corrupt.'; return $state }
@@ -644,13 +727,15 @@ function Get-AesSystemState {
             $identity = Get-AesMicrosoftSourceIdentity $environment
             if ([bool]$identity.Accepted) { $originalHash = [string]$identity.Hash }
         }
-        if ($originalHash -and $state.CurrentHash -eq $originalHash.ToLowerInvariant()) { $state.Status = if ($state.BackupExists) { 'OriginalWithBackup' } else { 'Original' }; return $state }
+        if ($originalHash -and $state.CurrentHash -eq $originalHash.ToLowerInvariant()) { $state.Status = if ($state.BackupExists) { 'OriginalWithBackup' } else { 'Original' }; $state.InstallationMode = 'Original'; return $state }
         $outputHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
         if (-not $outputHash) { $outputHash = [string](Get-AesMemberValue $persistent 'outputHash') }
-        if ($state.BackupExists -and $outputHash -match '^[a-fA-F0-9]{64}$' -and $state.CurrentHash -eq $outputHash.ToLowerInvariant()) { $state.Status = 'Installed'; $state.RenderVerificationPending = $true; return $state }
+        if ($state.BackupExists -and $outputHash -match '^[a-fA-F0-9]{64}$' -and $state.CurrentHash -eq $outputHash.ToLowerInvariant()) {
+            $state.Status = 'Installed'; $state.InstallationMode = Get-AesInstallationMode $persistent $outputHash 'Installed'; $state.RenderVerificationPending = ($state.InstallationMode -eq 'Built'); return $state
+        }
         $state.Status = 'ExternalDrift'; $state.Reason = 'The current font is neither the verified original nor this transaction output.'; return $state
     } catch {
-        return @{ Supported = $false; Reason = $_.Exception.Message; WindowsVersion = $null; Build = $null; Architecture = $null; IsElevated = $false; Status = 'Error'; CurrentFont = $null; CurrentHash = $null; OriginalFont = $null; BackupExists = $false; BackupPath = $null; RenderVerificationPending = $false; RestartRequired = $false; Operation = $null; Message = $_.Exception.Message }
+        return @{ Supported = $false; Reason = $_.Exception.Message; WindowsVersion = $null; Build = $null; Architecture = $null; IsElevated = $false; Status = 'Error'; CurrentFont = $null; CurrentHash = $null; OriginalFont = $null; BackupExists = $false; BackupPath = $null; InstallationMode = 'Unknown'; RenderVerificationPending = $false; RestartRequired = $false; Operation = $null; Message = $_.Exception.Message; VerificationPassed = $false; VerificationReason = $_.Exception.Message }
     }
 }
 
@@ -707,9 +792,16 @@ function New-AesStageFont {
     param([string]$Source, [hashtable]$Paths, [hashtable]$Metadata, [hashtable]$Journal)
     $stage = Join-Path $Paths.StageDirectory ("seguiemj." + $Journal.operationId + '.ttf')
     if (-not (Test-AesOwnedPath $stage $Paths.Root) -or (Test-Path -LiteralPath $stage)) { throw 'Unsafe or colliding staging path.' }
+    $approvedHash = [string](Get-AesMemberValue $Journal 'pendingOutputHash')
+    if (-not $approvedHash) { $approvedHash = [string](Get-AesMemberValue $Journal 'outputHash') }
+    if ($approvedHash -notmatch '^[a-fA-F0-9]{64}$') { throw 'Transaction journal does not contain an approved staged-font hash.' }
+    $approvedHash = $approvedHash.ToLowerInvariant()
     try {
         Invoke-AesCopy $Source $stage
-        if ((Get-AesHash $stage) -ne (Get-AesHash $Source)) { throw 'Staged font byte verification failed.' }
+        # The candidate was approved before this transaction began.  Comparing
+        # only stage and source here would accept a source file that changed
+        # during copying, so always bind the staged bytes to the journaled hash.
+        if ((Get-AesHash $stage) -ne $approvedHash) { throw 'Staged font bytes no longer match the approved transaction hash.' }
         # The boot-time moved file inherits this original descriptor.  Its
         # stage parent gives SYSTEM DeleteChild, so Session Manager can consume
         # the source even when this descriptor itself lacks DELETE.
@@ -748,7 +840,14 @@ function Invoke-AesInstallRollback {
 
 function Install-AesFont {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$FontPath, [Parameter(Mandatory = $true)][string]$ReportPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$FontPath,
+        [Parameter(ParameterSetName = 'Built', Mandatory = $true)][string]$ReportPath,
+        [Parameter(ParameterSetName = 'Pinned', Mandatory = $true)][switch]$PinnedApple
+    )
+    # $PSCmdlet is not reliably retained through the mutex callback's dynamic
+    # scope on Windows PowerShell 5.1.  Capture the selected set before it.
+    $requestedParameterSet = $PSCmdlet.ParameterSetName
     return Invoke-AesLocked {
         $environment = Get-AesEnvironment; $paths = Get-AesPaths $environment
         $failure = Get-AesMutationFailure $environment
@@ -759,7 +858,11 @@ function Install-AesFont {
             if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or [System.IO.Path]::GetExtension($source).ToLowerInvariant() -ne '.ttf') { throw 'FontPath must name an existing .ttf file.' }
             if ($source.Equals($environment.TargetPath, [StringComparison]::OrdinalIgnoreCase)) { throw 'The replacement font cannot be the system target.' }
             $currentHash = Get-AesHash $environment.TargetPath
-            $sourceHash = Get-AesHash $source
+            $installationMode = if ($requestedParameterSet -eq 'Pinned') { 'Pinned' } else { 'Built' }
+            # Pinned mode never takes a caller-supplied report as authority.  It
+            # accepts exactly one release byte stream, before any backup, queue,
+            # ACL, or transaction-directory mutation is attempted.
+            $sourceHash = if ($installationMode -eq 'Pinned') { Test-AesPinnedAppleAsset $source } else { Get-AesHash $source }
             Ensure-AesDirectories $paths
             [void](Clear-AesOrphanedStagePendingPairs $paths $environment)
             $existing = Test-AesBackupMetadata $paths $environment
@@ -770,8 +873,11 @@ function Install-AesFont {
                 $metadata = $existing.Metadata
                 $oldJournal = Read-AesJson $paths.Journal
                 if ($null -ne $oldJournal -and -not [bool](Get-AesMemberValue $oldJournal '__AesCorrupt' $false) -and (Test-AesPendingPair (Get-AesPendingEntries) (Get-AesMemberValue $oldJournal 'stagePath') (Get-AesMemberValue $oldJournal 'targetPath'))) { return (Get-AesSystemState) }
-                $installedHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
-                if ($currentHash -eq $sourceHash -and $installedHash -and $installedHash.Equals($sourceHash, [StringComparison]::OrdinalIgnoreCase)) { return (Get-AesSystemState) }
+                $knownState = Get-AesSystemState
+                # Do not queue or overwrite a second tool-mode font.  Changing
+                # between Built and Pinned is intentionally a restore/reboot
+                # boundary so the verified original remains the only crossover.
+                if ($knownState.Status -eq 'Installed') { return $knownState }
                 if ($currentHash -ne ([string]$metadata.originalHash).ToLowerInvariant()) { throw 'External font drift was detected; install will not overwrite it.' }
                 $oldAnchor = [string](Get-AesMemberValue $oldJournal 'anchorPath')
                 if ($oldAnchor -and (Test-Path -LiteralPath $oldAnchor -PathType Leaf)) { throw 'A previous boot finalizer has not restored its anchor yet.' }
@@ -780,9 +886,9 @@ function Install-AesFont {
                 if (-not [bool]$identity.Accepted) { throw 'The current Segoe UI Emoji source is not a verified Microsoft/TrustedInstaller baseline.' }
                 if ($currentHash -ne [string]$identity.Hash) { throw 'The current target changed during baseline inspection.' }
             }
-            [void](Read-AesCoverageReport $ReportPath $source $currentHash)
+            if ($installationMode -eq 'Built') { [void](Read-AesCoverageReport $ReportPath $source $currentHash) }
             $operationId = [guid]::NewGuid().ToString('N')
-            $journal = @{ schemaVersion = 1; operationId = $operationId; operation = 'Install'; status = 'PreparingInstall'; targetPath = $environment.TargetPath; stagePath = $null; pendingOutputHash = $sourceHash; targetSecurityChanged = $false; createdUtc = [DateTime]::UtcNow.ToString('o') }
+            $journal = @{ schemaVersion = 1; operationId = $operationId; operation = 'Install'; status = 'PreparingInstall'; targetPath = $environment.TargetPath; stagePath = $null; pendingOutputHash = $sourceHash; outputHash = $sourceHash; installationMode = $installationMode; renderVerificationPending = ($installationMode -eq 'Built'); targetSecurityChanged = $false; createdUtc = [DateTime]::UtcNow.ToString('o') }
             $context.journal = $journal
             Write-AesJson $paths.Journal $journal $paths.Root
             $context.ownsJournal = $true
@@ -791,7 +897,7 @@ function Install-AesFont {
             $stage = New-AesStageFont $source $paths $metadata $journal; $context.stagePath = $stage
             Prepare-AesBootReplacement $paths $environment $metadata $journal $context; $context.anchorPath = [string]$journal.anchorPath
             $journal.status = 'PendingInstall'; Write-AesJson $paths.Journal $journal $paths.Root
-            Write-AesJson $paths.State @{ schemaVersion = 1; status = 'PendingInstall'; installedOutputHash = $sourceHash; pendingOutputHash = $sourceHash; pendingOperation = 'Install'; operationId = $operationId; updatedUtc = [DateTime]::UtcNow.ToString('o') } $paths.Root
+            Write-AesJson $paths.State @{ schemaVersion = 1; status = 'PendingInstall'; installedOutputHash = $sourceHash; pendingOutputHash = $sourceHash; pendingOperation = 'Install'; installationMode = $installationMode; pendingInstallationMode = $installationMode; renderVerificationPending = ($installationMode -eq 'Built'); operationId = $operationId; updatedUtc = [DateTime]::UtcNow.ToString('o') } $paths.Root
             $context.wroteState = $true
             return (Get-AesSystemState)
         } catch {
@@ -817,14 +923,16 @@ function Restore-AesFont {
             $currentHash = Get-AesHash $environment.TargetPath
             $persistent = Read-AesJson $paths.State
             $installedOutputHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
+            if (-not $installedOutputHash) { $installedOutputHash = [string](Get-AesMemberValue $persistent 'outputHash') }
+            $installedMode = Get-AesInstallationMode $persistent $installedOutputHash 'Installed'
             $oldJournal = Read-AesJson $paths.Journal
             if ($null -ne $oldJournal -and -not [bool](Get-AesMemberValue $oldJournal '__AesCorrupt' $false) -and (Test-AesPendingPair (Get-AesPendingEntries) (Get-AesMemberValue $oldJournal 'stagePath') (Get-AesMemberValue $oldJournal 'targetPath'))) { return (Get-AesSystemState) }
-            if ($currentHash -eq ([string]$backup.Metadata.originalHash).ToLowerInvariant()) { return (New-AesBaseState $environment 'Original' '') }
+            if ($currentHash -eq ([string]$backup.Metadata.originalHash).ToLowerInvariant()) { $original = New-AesBaseState $environment 'Original' ''; $original.InstallationMode = 'Original'; return $original }
             if ($installedOutputHash -notmatch '^[a-fA-F0-9]{64}$' -or $currentHash -ne $installedOutputHash.ToLowerInvariant()) { throw 'External font drift was detected; restore will not overwrite it.' }
             $oldAnchor = [string](Get-AesMemberValue $oldJournal 'anchorPath')
             if ($oldAnchor -and (Test-Path -LiteralPath $oldAnchor -PathType Leaf)) { throw 'A previous boot finalizer has not restored its anchor yet.' }
             $operationId = [guid]::NewGuid().ToString('N')
-            $journal = @{ schemaVersion = 1; operationId = $operationId; operation = 'Restore'; status = 'PreparingRestore'; targetPath = $environment.TargetPath; stagePath = $null; pendingOutputHash = $backup.Metadata.originalHash; targetSecurityChanged = $false; createdUtc = [DateTime]::UtcNow.ToString('o') }
+            $journal = @{ schemaVersion = 1; operationId = $operationId; operation = 'Restore'; status = 'PreparingRestore'; targetPath = $environment.TargetPath; stagePath = $null; pendingOutputHash = $backup.Metadata.originalHash; outputHash = $backup.Metadata.originalHash; installationMode = $installedMode; pendingInstallationMode = 'Original'; renderVerificationPending = $false; targetSecurityChanged = $false; createdUtc = [DateTime]::UtcNow.ToString('o') }
             $context.journal = $journal
             Write-AesJson $paths.Journal $journal $paths.Root
             $context.ownsJournal = $true
@@ -832,7 +940,7 @@ function Restore-AesFont {
             $context.originalSddl = $backup.Metadata.originalSddl
             Prepare-AesBootReplacement $paths $environment $backup.Metadata $journal $context; $context.anchorPath = [string]$journal.anchorPath
             $journal.status = 'PendingRestore'; Write-AesJson $paths.Journal $journal $paths.Root
-            Write-AesJson $paths.State @{ schemaVersion = 1; status = 'PendingRestore'; installedOutputHash = $installedOutputHash; pendingOutputHash = $backup.Metadata.originalHash; pendingOperation = 'Restore'; operationId = $operationId; updatedUtc = [DateTime]::UtcNow.ToString('o') } $paths.Root
+            Write-AesJson $paths.State @{ schemaVersion = 1; status = 'PendingRestore'; installedOutputHash = $installedOutputHash; pendingOutputHash = $backup.Metadata.originalHash; pendingOperation = 'Restore'; installationMode = $installedMode; pendingInstallationMode = 'Original'; renderVerificationPending = $false; operationId = $operationId; updatedUtc = [DateTime]::UtcNow.ToString('o') } $paths.Root
             $context.wroteState = $true
             return (Get-AesSystemState)
         } catch {
@@ -873,11 +981,89 @@ function Undo-AesPendingOperation {
             $prior = Read-AesJson $paths.State
             if ($null -eq $prior -or [bool](Get-AesMemberValue $prior '__AesCorrupt' $false)) { $prior = @{} }
             $prior.schemaVersion = 1; $prior.status = 'Cancelled'; $prior.pendingOutputHash = $null; $prior.pendingOperation = $null; $prior.updatedUtc = [DateTime]::UtcNow.ToString('o')
-            if ([string](Get-AesMemberValue $journal 'operation') -eq 'Install') { $prior.installedOutputHash = $null }
+            $prior.pendingInstallationMode = $null
+            if ([string](Get-AesMemberValue $journal 'operation') -eq 'Install') {
+                $prior.installedOutputHash = $null; $prior.installationMode = 'Original'; $prior.renderVerificationPending = $false
+            } else {
+                $prior.installationMode = Get-AesInstallationMode $prior ([string](Get-AesMemberValue $prior 'installedOutputHash')) 'Installed'
+                $prior.renderVerificationPending = ($prior.installationMode -eq 'Built')
+            }
             Write-AesJson $paths.State $prior $paths.Root
             return (New-AesBaseState $environment 'Cancelled' '')
         } catch { return (New-AesBaseState $environment 'Failed' $_.Exception.Message) }
     }
+}
+
+function Verify-AesInstallation {
+    <#
+    Read-only verification for the CLI and GUI.  It never calls Ensure-*, takes
+    no mutex, requests no elevation, and does not repair a transaction: a
+    pending move or unfinished startup finalizer is deliberately reported as
+    unverified rather than being silently completed.
+    #>
+    [CmdletBinding()]
+    param()
+    $result = Get-AesSystemState
+    $result.VerificationPassed = $false
+    $result.VerificationReason = ''
+    try {
+        if (-not [bool]$result.Supported) { throw ([string]$result.Reason) }
+        if ($result.Status -in @('PendingInstall', 'PendingRestore', 'PreparingInstall', 'PreparingRestore')) {
+            throw 'A boot-time operation is still pending; restart before verifying the installed font.'
+        }
+        if ($result.Status -notin @('Original', 'OriginalWithBackup', 'Installed')) {
+            throw "The current transaction state '$($result.Status)' cannot be verified as complete."
+        }
+        $environment = Get-AesEnvironment
+        $paths = Get-AesPaths $environment
+        $backup = Test-AesBackupMetadata $paths $environment
+        if ($backup.Exists -and -not $backup.Valid) { throw $backup.Reason }
+
+        $expectedHash = $null
+        $expectedSddl = $null
+        if ($result.Status -eq 'Installed') {
+            if (-not $backup.Valid) { throw 'An installed replacement requires a verified original backup.' }
+            $persistent = Read-AesJson $paths.State
+            if ($null -eq $persistent -or [bool](Get-AesMemberValue $persistent '__AesCorrupt' $false)) { throw 'Installed font state is missing or corrupt.' }
+            $expectedHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
+            if (-not $expectedHash) { $expectedHash = [string](Get-AesMemberValue $persistent 'outputHash') }
+            if ($expectedHash -notmatch '^[a-fA-F0-9]{64}$') { throw 'Installed font state does not contain a valid output hash.' }
+            $expectedSddl = [string](Get-AesMemberValue $backup.Metadata 'originalSddl')
+            if ($result.InstallationMode -eq 'Pinned' -and ((Get-AesFileSize $environment.TargetPath) -ne $script:AesExpectedAppleSourceSize -or $expectedHash.ToLowerInvariant() -ne $script:AesExpectedAppleSourceHash)) {
+                throw 'Pinned Apple installation does not match its exact approved file identity.'
+            }
+        } elseif ($backup.Valid) {
+            $expectedHash = [string](Get-AesMemberValue $backup.Metadata 'originalHash')
+            $expectedSddl = [string](Get-AesMemberValue $backup.Metadata 'originalSddl')
+        } else {
+            $identity = Get-AesMicrosoftSourceIdentity $environment
+            if (-not [bool]$identity.Accepted) { throw 'Current native font has no verified Microsoft/TrustedInstaller baseline.' }
+            $expectedHash = [string]$identity.Hash
+            $expectedSddl = [string]$identity.Sddl
+        }
+        if ($result.CurrentHash -ne $expectedHash.ToLowerInvariant()) { throw 'Current font bytes do not match the recorded transaction state.' }
+        if ([string]::IsNullOrWhiteSpace($expectedSddl) -or (Get-AesSecuritySddl $environment.TargetPath) -ne $expectedSddl) {
+            throw 'Current font owner, group, or DACL does not match the original baseline.'
+        }
+
+        $journal = Read-AesJson $paths.Journal
+        if ($null -ne $journal) {
+            if ([bool](Get-AesMemberValue $journal '__AesCorrupt' $false)) { throw 'Transaction journal is corrupt.' }
+            $anchor = [string](Get-AesMemberValue $journal 'anchorPath')
+            if ($anchor) {
+                if (-not (Test-AesOwnedPath $anchor $paths.Root)) { throw 'Transaction journal contains an unsafe restore-anchor path.' }
+                if (Test-Path -LiteralPath $anchor -PathType Leaf) { throw 'Startup finalizer has not restored the original inode permissions yet.' }
+            }
+            $taskName = [string](Get-AesMemberValue $journal 'finalizerTaskName')
+            if ($taskName -and (Test-AesFinalizerRegistered $taskName)) { throw 'Startup finalizer is still registered; permission rollback is incomplete.' }
+        }
+        $result.VerificationPassed = $true
+        $result.VerificationReason = 'Font bytes, backup bytes, and original owner/group/DACL state are verified.'
+    } catch {
+        $result.VerificationPassed = $false
+        $result.VerificationReason = $_.Exception.Message
+    }
+    return $result
 }
 
 function Confirm-AesState {
@@ -895,24 +1081,27 @@ function Confirm-AesState {
         $stage = [string](Get-AesMemberValue $journal 'stagePath')
         $target = [string](Get-AesMemberValue $journal 'targetPath')
         $outputHash = [string](Get-AesMemberValue $journal 'outputHash')
+        if (-not $outputHash) { $outputHash = [string](Get-AesMemberValue $journal 'pendingOutputHash') }
         if (-not $stage -or -not (Test-AesOwnedPath $stage $paths.Root) -or -not $target.Equals($environment.TargetPath, [StringComparison]::OrdinalIgnoreCase) -or $outputHash -notmatch '^[a-fA-F0-9]{64}$') { return $state }
         if (Test-AesPendingPair (Get-AesPendingEntries) $stage $target) { return $state }
         $confirmed = New-AesBaseState $environment
         if ($confirmed.CurrentHash -eq $outputHash.ToLowerInvariant()) {
             if ([string](Get-AesMemberValue $journal 'operation') -eq 'Restore') {
-                $confirmed.Status = 'Original'; $confirmed.Reason = 'The queued original font was verified after restart.'
+                $confirmed.Status = 'Original'; $confirmed.Reason = 'The queued original font was verified after restart.'; $confirmed.InstallationMode = 'Original'
             } else {
-                $confirmed.Status = 'Installed'; $confirmed.Reason = 'The queued replacement font was verified after restart.'; $confirmed.RenderVerificationPending = $true
+                $confirmed.Status = 'Installed'; $confirmed.Reason = 'The queued replacement font was verified after restart.'
+                $confirmed.InstallationMode = Get-AesInstallationMode $journal $outputHash 'Installed'
+                $confirmed.RenderVerificationPending = ($confirmed.InstallationMode -eq 'Built')
             }
             return $confirmed
         }
         $backup = Test-AesBackupMetadata $paths $environment
         if ($backup.Valid -and $confirmed.CurrentHash -eq ([string](Get-AesMemberValue $backup.Metadata 'originalHash')).ToLowerInvariant()) {
-            $confirmed.Status = 'NotApplied'; $confirmed.Reason = 'The queued operation was not applied at restart.'; return $confirmed
+            $confirmed.Status = 'NotApplied'; $confirmed.Reason = 'The queued operation was not applied at restart.'; $confirmed.InstallationMode = 'Original'; return $confirmed
         }
         $confirmed.Status = 'ExternalDrift'; $confirmed.Reason = 'The post-restart font hash differs from the queued output.'; return $confirmed
     } catch { return $state }
     return $state
 }
 
-Export-ModuleMember -Function Get-AesSystemState, Install-AesFont, Restore-AesFont, Undo-AesPendingOperation, Confirm-AesState
+Export-ModuleMember -Function Get-AesSystemState, Install-AesFont, Restore-AesFont, Undo-AesPendingOperation, Confirm-AesState, Verify-AesInstallation

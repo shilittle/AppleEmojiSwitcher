@@ -34,6 +34,29 @@ try {
 
     . $bootstrap
 
+    # Internal fixture seam: the production Initialize-AesResources path calls
+    # the pinned Initialize-AesFontResource.  This test exercises the complete
+    # runtime/Unicode pipeline with a tiny local font fixture without accepting
+    # an arbitrary font in the shipped API.
+    function Initialize-AesFontResource {
+        param(
+            [Parameter(Mandatory = $true)][string]$PackageRoot,
+            [string]$CacheRoot,
+            [scriptblock]$Progress,
+            [scriptblock]$Cancelled
+        )
+        $lock = Get-AesPackageLock -PackageRoot $PackageRoot
+        if ([string]::IsNullOrWhiteSpace($CacheRoot)) { $CacheRoot = Join-Path (Get-AesLocalAppDataRoot) 'AppleEmojiSwitcher\cache' }
+        $cachePath = [IO.Path]::GetFullPath($CacheRoot)
+        $entry = Get-AesProperty -InputObject $lock -Name 'font'
+        $name = [string](Get-AesProperty -InputObject $entry -Name 'filename')
+        $sha = ([string](Get-AesProperty -InputObject $entry -Name 'sha256')).ToLowerInvariant()
+        $size = Get-AesExpectedSize -Entry $entry
+        $path = Get-AesCacheArtifactPath -CacheRoot $cachePath -Category 'font' -FileName $name
+        Invoke-AesDownloadVerified -Uri ([string](Get-AesProperty -InputObject $entry -Name 'url')) -Destination $path -Sha256 $sha -Size $size -Progress $Progress -Cancelled $Cancelled | Out-Null
+        return @{ AppleFont = [IO.Path]::GetFullPath($path); CacheRoot = $cachePath }
+    }
+
     $runtimeSource = Join-Path $sourceRoot 'runtime-files'
     [IO.Directory]::CreateDirectory($runtimeSource) | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $runtimeSource 'python.exe'), [byte[]](1, 2, 3, 4))

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 # Isolated transaction tests.  The module's private backend seam redirects the
@@ -24,8 +24,16 @@ function Get-TestHash {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# Read-only scheduler regression under the same strict preference as the CLI.
+# A GUID task name is queried only; no task is created, changed or deleted.
+$absentFinalizer = & $transactionModule {
+    $ErrorActionPreference = 'Stop'
+    Test-AesFinalizerRegistered ('\AppleEmojiSwitcher-Finalize-' + [guid]::NewGuid().ToString('N'))
+}
+Assert-Equal $absentFinalizer $false 'An already removed finalizer must not make strict CLI verification fail'
+
 function New-IsolatedCase {
-    param([switch]$FailStage, [switch]$FailQueue, [switch]$NativeMovePrefix)
+    param([switch]$FailStage, [switch]$FailQueue, [switch]$NativeMovePrefix, [switch]$TamperStage)
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ("AppleEmojiSwitcher-Test-" + [guid]::NewGuid().ToString('N'))
     $targetDirectory = Join-Path $root 'fake-windows\Fonts'
     [void][System.IO.Directory]::CreateDirectory($targetDirectory)
@@ -66,10 +74,18 @@ function New-IsolatedCase {
         CreateRestoreAnchor = { param($anchorPath, $targetPath) Copy-Item -LiteralPath $targetPath -Destination $anchorPath -ErrorAction Stop }
         RegisterFinalizer = { param($paths, $journal) $state.FinalizerTask = "\AppleEmojiSwitcher-Finalize-$($journal.operationId)"; return @{ TaskName = $state.FinalizerTask; ScriptPath = (Join-Path $paths.FinalizerDirectory 'test-finalizer.ps1'); ScriptHash = ('b' * 64); NativePath = (Join-Path $paths.FinalizerDirectory 'test-native.cs'); NativeHash = ('c' * 64) } }
         RemoveFinalizer = { param($taskName) if ($state.FinalizerTask -eq $taskName) { $state.FinalizerTask = $null } }
+        IsFinalizerRegistered = { param($taskName) return ($state.FinalizerTask -eq $taskName) }
         CopyFile = {
             param($sourcePath, $destinationPath)
             if ($FailStage -and $destinationPath -match '[\\/]stage[\\/]') { throw 'injected stage copy failure' }
             Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -ErrorAction Stop
+            if ($TamperStage -and $destinationPath -match '[\\/]stage[\\/]') {
+                # Emulate a hostile/racy producer that changes both inputs
+                # after the report has approved the original candidate bytes.
+                $tampered = [System.Text.Encoding]::UTF8.GetBytes('tampered source and stage bytes')
+                [System.IO.File]::WriteAllBytes($sourcePath, $tampered)
+                [System.IO.File]::WriteAllBytes($destinationPath, $tampered)
+            }
         }
     }
     foreach ($key in @($backend.Keys)) {
@@ -85,6 +101,17 @@ function Use-IsolatedCase {
 
 function Clear-IsolatedCase {
     & $transactionModule { Clear-AesTestBackend }
+}
+
+function Set-TestPinnedIdentity {
+    param([hashtable]$Case)
+    $hash = Get-TestHash $Case.Source
+    $size = [int64]([System.IO.FileInfo]$Case.Source).Length
+    & $transactionModule { param($expectedHash, $expectedSize) $script:AesExpectedAppleSourceHash = $expectedHash; $script:AesExpectedAppleSourceSize = $expectedSize } $hash $size
+}
+
+function Reset-TestPinnedIdentity {
+    & $transactionModule { $script:AesExpectedAppleSourceHash = '18e48f1785564fbf511241e0963b265057bfe742036d8543406c6ce07e48ec0b'; $script:AesExpectedAppleSourceSize = [int64]256391076 }
 }
 
 function Remove-IsolatedCase {
@@ -259,6 +286,23 @@ try {
     Assert-Equal $case.State.Security[$case.Target] 'O:BADG:BAD:(A;;FA;;;BA)' 'stage failure preserves target security'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $case.Backend.Root 'backup\\seguiemj.ttf'))) 'rollback removes only its newly created backup'
 
+    # The staging helper must bind the copied bytes to the already approved
+    # journal hash, not merely compare the stage to a source that could change
+    # in the copy window.  A pre-existing verified backup must survive intact.
+    $case = New-IsolatedCase -TamperStage; $cases.Add($case)
+    $backupDirectory = Join-Path $case.Backend.Root 'backup'; [void][System.IO.Directory]::CreateDirectory($backupDirectory)
+    $backupFont = Join-Path $backupDirectory 'seguiemj.ttf'; $backupMetadata = Join-Path $backupDirectory 'original.json'
+    Copy-Item -LiteralPath $case.Target -Destination $backupFont
+    @{ schemaVersion = 1; originalHash = $case.OriginalHash; originalSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; originalOwnerAndAclSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; fontRegistry = @{ Exists = $true }; targetPath = $case.Target; build = 22631 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $backupMetadata -Encoding utf8
+    Use-IsolatedCase $case
+    $tamperedStage = Install-AesFont -FontPath $case.Source -ReportPath $case.Coverage
+    Assert-Equal $tamperedStage.Status 'Failed' 'source/stage tampering after approval is rejected'
+    Assert-Equal $case.State.QueueCount 0 'source/stage tampering never queues replacement'
+    Assert-Equal (Get-TestHash $case.Target) $case.OriginalHash 'source/stage tampering preserves target bytes'
+    Assert-Equal (Get-TestHash $backupFont) $case.OriginalHash 'source/stage tampering preserves the existing original backup'
+    Assert-True (Test-Path -LiteralPath $backupMetadata -PathType Leaf) 'source/stage tampering preserves existing backup metadata'
+    Assert-True (-not (Get-ChildItem -LiteralPath (Join-Path $case.Backend.Root 'stage') -File -ErrorAction SilentlyContinue)) 'tampered stage bytes are removed during rollback'
+
     # If queueing fails after the target has its temporary SYSTEM Delete ACE,
     # rollback restores the original descriptor and removes anchor/finalizer.
     $case = New-IsolatedCase -FailQueue; $cases.Add($case); Use-IsolatedCase $case
@@ -283,9 +327,102 @@ try {
     Assert-Equal $restore.Status 'Failed' 'restore refuses external drift'
     Assert-Equal $case.State.QueueCount 0 'external drift never queues restore'
 
-    'PASS Test-SystemTransaction.ps1: isolated queue, duplicate, corrupt-backup, stage-failure, cancellation, and drift cases passed.'
+    # Verify-AesInstallation is read-only and checks the active bytes, the
+    # immutable backup, and the original owner/group/DACL before declaring an
+    # installed replacement complete.
+    $case = New-IsolatedCase; $cases.Add($case); Use-IsolatedCase $case
+    $backupDirectory = Join-Path $case.Backend.Root 'backup'; [void][System.IO.Directory]::CreateDirectory($backupDirectory)
+    Copy-Item -LiteralPath $case.Target -Destination (Join-Path $backupDirectory 'seguiemj.ttf')
+    @{ schemaVersion = 1; originalHash = $case.OriginalHash; originalSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; originalOwnerAndAclSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; fontRegistry = @{ Exists = $true }; targetPath = $case.Target; build = 22631 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupDirectory 'original.json') -Encoding utf8
+    Copy-Item -LiteralPath $case.Source -Destination $case.Target -Force
+    @{ schemaVersion = 1; status = 'Installed'; installedOutputHash = (Get-TestHash $case.Source); installationMode = 'Built' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $case.Backend.Root 'state.json') -Encoding utf8
+    $verified = Verify-AesInstallation
+    Assert-True $verified.VerificationPassed 'installed built font verifies without drawing claims'
+    $case.State.Security[$case.Target] = 'O:BADG:BAD:(A;;FA;;;WD)'
+    $badPermissions = Verify-AesInstallation
+    Assert-True (-not $badPermissions.VerificationPassed) 'verification rejects owner/group/DACL drift'
+    Assert-True ($badPermissions.VerificationReason -match 'owner, group, or DACL') 'verification reports permission drift'
+    $case.State.Security[$case.Target] = 'O:BADG:BAD:(A;;FA;;;BA)'
+    $finalizerId = 'f' * 32; $case.State.FinalizerTask = "\AppleEmojiSwitcher-Finalize-$finalizerId"
+    @{ schemaVersion = 1; operationId = $finalizerId; operation = 'Install'; targetPath = $case.Target; stagePath = (Join-Path $case.Backend.Root 'stage\seguiemj.ffffffffffffffffffffffffffffffff.ttf'); pendingOutputHash = (Get-TestHash $case.Source); installationMode = 'Built'; anchorPath = (Join-Path $case.Backend.Root 'anchor\old-inode.ffffffffffffffffffffffffffffffff.ttf'); finalizerTaskName = $case.State.FinalizerTask } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $case.Backend.Root 'journal.json') -Encoding utf8
+    $unfinishedFinalizer = Verify-AesInstallation
+    Assert-True (-not $unfinishedFinalizer.VerificationPassed) 'installed bytes are not complete while finalizer remains registered'
+    Assert-True ($unfinishedFinalizer.VerificationReason -match 'finalizer') 'verification identifies finalizer rollback state'
+    $case.State.FinalizerTask = $null
+
+    # Pinned mode verifies only the fixed release identity.  The temporary
+    # private expected identity lets this isolated test use tiny fixture bytes;
+    # production callers cannot set it through any exported parameter.
+    $pinCase = New-IsolatedCase; $cases.Add($pinCase); Use-IsolatedCase $pinCase
+    Set-TestPinnedIdentity $pinCase
+    try {
+        $badHashPath = Join-Path $pinCase.Root 'bad-hash.ttf'
+        $badHashBytes = [System.IO.File]::ReadAllBytes($pinCase.Source); $badHashBytes[0] = $badHashBytes[0] -bxor 1
+        [System.IO.File]::WriteAllBytes($badHashPath, $badHashBytes)
+        $badHash = Install-AesFont -FontPath $badHashPath -PinnedApple
+        Assert-Equal $badHash.Status 'Failed' 'pinned mode rejects an incorrect SHA-256'
+        Assert-Equal $pinCase.State.QueueCount 0 'incorrect pinned hash never queues a replacement'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $pinCase.Backend.Root 'backup\seguiemj.ttf'))) 'incorrect pinned hash creates no original backup'
+
+        $badSizePath = Join-Path $pinCase.Root 'bad-size.ttf'
+        $originalBytes = [System.IO.File]::ReadAllBytes($pinCase.Source); $largerBytes = New-Object byte[] ($originalBytes.Length + 1); [Array]::Copy($originalBytes, $largerBytes, $originalBytes.Length)
+        [System.IO.File]::WriteAllBytes($badSizePath, $largerBytes)
+        $badSize = Install-AesFont -FontPath $badSizePath -PinnedApple
+        Assert-Equal $badSize.Status 'Failed' 'pinned mode rejects an incorrect byte size'
+        Assert-Equal $pinCase.State.QueueCount 0 'incorrect pinned size never queues a replacement'
+
+        $pinned = Install-AesFont -FontPath $pinCase.Source -PinnedApple
+        Assert-Equal $pinned.Status 'PendingInstall' ('pinned release queues a verified replacement: ' + $pinned.Reason)
+        Assert-Equal $pinned.InstallationMode 'Pinned' 'pinned pending state records its mode'
+        Assert-True (-not $pinned.RenderVerificationPending) 'pinned mode never claims a render-verification requirement'
+        $pinnedJournal = Get-Content -Raw -LiteralPath (Join-Path $pinCase.Backend.Root 'journal.json') | ConvertFrom-Json
+        Assert-Equal $pinnedJournal.installationMode 'Pinned' 'pinned mode reaches the finalizer journal'
+        $pendingVerification = Verify-AesInstallation
+        Assert-True (-not $pendingVerification.VerificationPassed) 'pending pinned replacement is not reported complete'
+        $pinnedAgain = Install-AesFont -FontPath $pinCase.Source -PinnedApple
+        Assert-Equal $pinnedAgain.Status 'PendingInstall' 'duplicate pinned request reports the existing transaction'
+        Assert-Equal $pinCase.State.QueueCount 1 'duplicate pinned request does not queue again'
+
+        # Simulate the consumed boot pair and a completed permission rollback,
+        # then ensure a GUI/Built request cannot overwrite the installed pinned
+        # font until the shared restore/reboot boundary has happened.
+        $pinCase.State.Pending = @($pinCase.State.Pending[0..3])
+        Copy-Item -LiteralPath $pinCase.Source -Destination $pinCase.Target -Force
+        Remove-Item -LiteralPath $pinnedJournal.stagePath -Force
+        Remove-Item -LiteralPath $pinnedJournal.anchorPath -Force
+        $pinCase.State.FinalizerTask = $null
+        $pinCase.State.Security[$pinCase.Target] = 'O:BADG:BAD:(A;;FA;;;BA)'
+        $installedPinned = Get-AesSystemState
+        Assert-Equal $installedPinned.InstallationMode 'Pinned' 'legacy journal inference recognizes the fixed pinned hash'
+        $crossMode = Install-AesFont -FontPath $pinCase.Source -ReportPath $pinCase.Coverage
+        Assert-Equal $crossMode.Status 'Installed' 'cross-mode request reports the installed pinned font'
+        Assert-Equal $pinCase.State.QueueCount 1 'cross-mode request does not overwrite or queue'
+        $restorePinned = Restore-AesFont
+        Assert-Equal $restorePinned.Status 'PendingRestore' ('CLI can restore a pinned installation created by the shared transaction core: ' + $restorePinned.Reason)
+        Assert-Equal $restorePinned.InstallationMode 'Pinned' 'pending restore retains the installed mode for status reporting'
+        $cancelPinnedRestore = Undo-AesPendingOperation
+        Assert-Equal $cancelPinnedRestore.Status 'Cancelled' 'CLI can cancel the pending shared restore'
+        $afterPinnedCancel = Get-AesSystemState
+        Assert-Equal $afterPinnedCancel.InstallationMode 'Pinned' 'cancelled restore returns to the pinned installation mode'
+    } finally { Reset-TestPinnedIdentity }
+
+    # Old persistent state records have no mode field.  A non-pinned output is
+    # conservatively inferred as Built so current GUI installations remain
+    # compatible with the new CLI.
+    $legacyCase = New-IsolatedCase; $cases.Add($legacyCase); Use-IsolatedCase $legacyCase
+    $backupDirectory = Join-Path $legacyCase.Backend.Root 'backup'; [void][System.IO.Directory]::CreateDirectory($backupDirectory)
+    Copy-Item -LiteralPath $legacyCase.Target -Destination (Join-Path $backupDirectory 'seguiemj.ttf')
+    @{ schemaVersion = 1; originalHash = $legacyCase.OriginalHash; originalSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; originalOwnerAndAclSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; fontRegistry = @{ Exists = $true }; targetPath = $legacyCase.Target; build = 22631 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupDirectory 'original.json') -Encoding utf8
+    Copy-Item -LiteralPath $legacyCase.Source -Destination $legacyCase.Target -Force
+    @{ schemaVersion = 1; status = 'Installed'; outputHash = (Get-TestHash $legacyCase.Source) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $legacyCase.Backend.Root 'state.json') -Encoding utf8
+    $legacyMode = Get-AesSystemState
+    Assert-Equal $legacyMode.InstallationMode 'Built' 'legacy state without a mode is inferred as Built'
+    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '..\lib\Finalize-Transaction.ps1')) -match 'installationMode') 'startup finalizer persists installation mode into finalized state'
+
+    'PASS Test-SystemTransaction.ps1: isolated queue, mode-aware install/restore/cancel, Pinned asset rejection, verification, and legacy state cases passed.'
 } finally {
     Clear-IsolatedCase
+    Reset-TestPinnedIdentity
     foreach ($case in $cases) { Remove-IsolatedCase $case }
     Remove-Module SystemTransaction -Force -ErrorAction SilentlyContinue
 }

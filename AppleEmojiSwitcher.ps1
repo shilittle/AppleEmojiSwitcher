@@ -14,49 +14,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-function Initialize-AesPowerShellModules {
-    # Hidden WSH/Start-Process launches can inherit a PSModulePath assembled
-    # by another PowerShell host.  Repair it only for this process, then load
-    # the built-in modules needed by the transaction layer.  No user or
-    # machine environment variable is persisted.
-    $requiredPaths = New-Object System.Collections.Generic.List[string]
-    if (-not [string]::IsNullOrWhiteSpace($PSHOME)) {
-        $requiredPaths.Add([IO.Path]::Combine($PSHOME, 'Modules'))
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
-        $requiredPaths.Add([IO.Path]::Combine($env:ProgramFiles, 'WindowsPowerShell', 'Modules'))
-    }
-    # Put the native host's module directory first.  This prevents a stale
-    # PSModulePath inherited from pwsh or another user process from resolving
-    # a same-named module before Windows PowerShell's built-in implementation.
-    $paths = New-Object System.Collections.Generic.List[string]
-    foreach ($path in @($requiredPaths.ToArray()) + @([string]$env:PSModulePath -split ';')) {
-        if ([string]::IsNullOrWhiteSpace($path)) {
-            continue
-        }
-        $alreadyAdded = $false
-        foreach ($existing in $paths) {
-            if ([string]::Equals($existing, $path, [StringComparison]::OrdinalIgnoreCase)) {
-                $alreadyAdded = $true
-                break
-            }
-        }
-        if (-not $alreadyAdded) {
-            $paths.Add($path)
-        }
-    }
-    $env:PSModulePath = [string]::Join(';', $paths.ToArray())
-    $nativeModuleRoot = if ([string]::IsNullOrWhiteSpace($PSHOME)) { $null } else { [IO.Path]::Combine($PSHOME, 'Modules') }
-    foreach ($moduleName in @('Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Security')) {
-        $manifest = if ($null -eq $nativeModuleRoot) { $null } else { [IO.Path]::Combine($nativeModuleRoot, $moduleName, ($moduleName + '.psd1')) }
-        if (-not [string]::IsNullOrWhiteSpace($manifest) -and [IO.File]::Exists($manifest)) {
-            Import-Module -Name $manifest -Global -Force -ErrorAction Stop | Out-Null
-        }
-        else {
-            Import-Module -Name $moduleName -Global -Force -ErrorAction Stop | Out-Null
-        }
-    }
-}
+. (Join-Path $PSScriptRoot 'lib\Common.ps1')
 
 Initialize-AesPowerShellModules
 
@@ -151,7 +109,7 @@ function Get-AesStateSummary {
         return $null
     }
     $summary = [ordered]@{}
-    foreach ($name in @('Supported', 'Reason', 'WindowsVersion', 'Build', 'Architecture', 'IsElevated', 'Status', 'CurrentFont', 'CurrentHash', 'OriginalFont', 'BackupExists', 'BackupPath', 'SourceVersion', 'RenderVerificationPending', 'RestartRequired')) {
+    foreach ($name in @('Supported', 'Reason', 'WindowsVersion', 'Build', 'Architecture', 'IsElevated', 'Status', 'InstallationMode', 'CurrentFont', 'CurrentHash', 'OriginalFont', 'BackupExists', 'BackupPath', 'SourceVersion', 'RenderVerificationPending', 'RestartRequired')) {
         $summary[$name] = Get-AesProperty -InputObject $State -Name $name
     }
     return $summary
@@ -218,59 +176,6 @@ function Get-AesStatus {
     }
 }
 
-function Get-AesPowerShellPath {
-    $candidate = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-        return $candidate
-    }
-    $command = Get-Command powershell.exe -ErrorAction SilentlyContinue
-    if ($null -ne $command) {
-        return $command.Source
-    }
-    throw '找不到 Windows PowerShell 5.1 powershell.exe。'
-}
-
-function ConvertTo-AesCommandLineArgument {
-    param([AllowNull()][string]$Value)
-
-    if ($null -eq $Value) {
-        return '""'
-    }
-    if ($Value.Length -eq 0) {
-        return '""'
-    }
-
-    # Quote according to CommandLineToArgvW rules, including trailing
-    # backslashes.  Start-Process joins the returned tokens into one command.
-    $builder = New-Object System.Text.StringBuilder
-    [void]$builder.Append('"')
-    $slashes = 0
-    foreach ($character in $Value.ToCharArray()) {
-        if ($character -eq [char]92) {
-            $slashes++
-            continue
-        }
-        if ($character -eq [char]34) {
-            if ($slashes -gt 0) {
-                [void]$builder.Append(('\' * ($slashes * 2)))
-            }
-            [void]$builder.Append('\"')
-            $slashes = 0
-            continue
-        }
-        if ($slashes -gt 0) {
-            [void]$builder.Append(('\' * $slashes))
-            $slashes = 0
-        }
-        [void]$builder.Append($character)
-    }
-    if ($slashes -gt 0) {
-        [void]$builder.Append(('\' * ($slashes * 2)))
-    }
-    [void]$builder.Append('"')
-    return $builder.ToString()
-}
-
 function Test-AesAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -320,6 +225,19 @@ function Get-AesCurrentState {
 function Get-AesStateValue {
     param($State, [string]$Name)
     return Get-AesProperty -InputObject $State -Name $Name
+}
+
+function Get-AesCurrentFontLabel {
+    param($State)
+    $status = [string](Get-AesStateValue -State $State -Name 'Status')
+    if ($status -in @('Installed','PendingRestore')) {
+        if ([string](Get-AesStateValue -State $State -Name 'InstallationMode') -eq 'Pinned') { return '苹果 Emoji（极简原版）' }
+        return '苹果 Emoji + 原生补齐'
+    }
+    if ($status -in @('Original','OriginalWithBackup','PendingInstall')) { return 'Segoe UI Emoji（Windows 原生）' }
+    $path = [string](Get-AesStateValue -State $State -Name 'CurrentFont')
+    if ([string]::IsNullOrWhiteSpace($path)) { return '未读取' }
+    return $path
 }
 
 function Test-AesSupported {
@@ -791,6 +709,16 @@ function Invoke-AesWorkerAction {
                 $message = '当前状态为 pending_reboot；重启后才能确认是否已安装。'
                 $finalStatus = 'pending_reboot'
             }
+            elseif ($confirmed -and $stateStatus -eq 'Installed' -and [string](Get-AesStateValue -State $confirmedState -Name 'InstallationMode') -eq 'Pinned') {
+                $fileResult = Invoke-AesCore -Name 'Verify-AesInstallation'
+                if ([bool](Get-AesProperty -InputObject $fileResult -Name 'VerificationPassed')) {
+                    $message = '极简苹果字体的文件、备份和权限校验通过；未执行实际绘制验收。'
+                    $finalStatus = 'installed'
+                } else {
+                    $message = '极简字体状态核验未通过：' + [string](Get-AesProperty -InputObject $fileResult -Name 'VerificationReason')
+                    $finalStatus = 'installed_unverified'
+                }
+            }
             elseif ($confirmed -and $stateStatus -match '(?i)^installed$' -and [bool](Get-AesStateValue -State $confirmedState -Name 'RenderVerificationPending')) {
                 if (-not (Import-AesDisplayVerifier)) {
                     $message = '字体字节状态已确认，但显示验收模块尚未就绪。'
@@ -1150,9 +1078,7 @@ function Start-AesUi {
             }
             $fontText.ToolTip = $font + [Environment]::NewLine + 'SHA-256: ' + $hash
             $currentStatus = [string](Get-AesStateValue -State $state -Name 'Status')
-            $fontText.Text = if ($currentStatus -in @('Installed','PendingRestore')) { '苹果 Emoji + 原生补齐' }
-                elseif ($currentStatus -in @('Original','OriginalWithBackup','PendingInstall')) { 'Segoe UI Emoji（Windows 原生）' }
-                else { $font }
+            $fontText.Text = Get-AesCurrentFontLabel -State $state
             $backupExists = [bool](Get-AesStateValue -State $state -Name 'BackupExists')
             $backupPath = [string](Get-AesStateValue -State $state -Name 'BackupPath')
             if ($backupExists) {
