@@ -35,6 +35,10 @@ function Get-AesMemberValue {
 function ConvertTo-AesHashtable {
     param($Value)
     if ($null -eq $Value) { return $null }
+    # In Windows PowerShell 5.1, path strings can arrive as PSObject-wrapped
+    # values and satisfy `-is [pscustomobject]`.  Preserve scalar values before
+    # recursively expanding custom-object properties such as String.Length.
+    if ($Value -is [string] -or $Value -is [ValueType]) { return $Value }
     if ($Value -is [System.Collections.IDictionary]) {
         $result = @{}
         foreach ($key in $Value.Keys) { $result[[string]$key] = ConvertTo-AesHashtable $Value[$key] }
@@ -290,6 +294,44 @@ function Get-AesRegistrySnapshot {
     return @{ Path = $path; Name = $script:AesFontValueName; Exists = ($null -ne $value); Value = $value; Kind = $kind }
 }
 
+function Get-AesSddlOwner {
+    param([string]$Sddl)
+    if ([string]::IsNullOrWhiteSpace($Sddl)) { return $null }
+    $match = [regex]::Match($Sddl, '^O:(.*?)(?=(?:G:|D:|S:)|$)')
+    if (-not $match.Success -or [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) { return $null }
+    return $match.Groups[1].Value
+}
+
+function Test-AesFontRegistryTarget {
+    # Windows normally stores a bare font file name, but valid installations can
+    # use a String/ExpandString value that resolves to the exact Fonts target.
+    # Do not accept any other relative spelling, registry kind, or target.
+    param([hashtable]$Environment, $Registry)
+    $value = Get-AesMemberValue $Registry 'Value'
+    $kind = [string](Get-AesMemberValue $Registry 'Kind')
+    if (-not [bool](Get-AesMemberValue $Registry 'Exists' $false)) {
+        return @{ Accepted = $false; Reason = 'The Segoe UI Emoji registry value is missing.'; Value = $null; Kind = $kind; ResolvedPath = $null }
+    }
+    if ($kind -notin @('String', 'ExpandString') -or $value -isnot [string]) {
+        return @{ Accepted = $false; Reason = "The Segoe UI Emoji registry value has unsupported kind '$kind'."; Value = if ($null -eq $value) { $null } else { [string]$value }; Kind = $kind; ResolvedPath = $null }
+    }
+    $text = [string]$value
+    if ($text.Equals('seguiemj.ttf', [StringComparison]::OrdinalIgnoreCase)) {
+        return @{ Accepted = $true; Reason = ''; Value = $text; Kind = $kind; ResolvedPath = $Environment.TargetPath }
+    }
+    $candidate = if ($kind -eq 'ExpandString') { [Environment]::ExpandEnvironmentVariables($text) } else { $text }
+    $fullyQualified = ($candidate -match '^[a-zA-Z]:[\\/]' -or $candidate -match '^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)')
+    if (-not $fullyQualified) {
+        return @{ Accepted = $false; Reason = 'The Segoe UI Emoji registry value is neither the bare file name nor a fully qualified drive or UNC path.'; Value = $text; Kind = $kind; ResolvedPath = $null }
+    }
+    try { $resolved = [System.IO.Path]::GetFullPath($candidate) }
+    catch { return @{ Accepted = $false; Reason = 'The Segoe UI Emoji registry value is not a valid path.'; Value = $text; Kind = $kind; ResolvedPath = $null } }
+    if (-not $resolved.Equals([System.IO.Path]::GetFullPath($Environment.TargetPath), [StringComparison]::OrdinalIgnoreCase)) {
+        return @{ Accepted = $false; Reason = "The Segoe UI Emoji registry value resolves outside the system target: '$resolved'."; Value = $text; Kind = $kind; ResolvedPath = $resolved }
+    }
+    return @{ Accepted = $true; Reason = ''; Value = $text; Kind = $kind; ResolvedPath = $resolved }
+}
+
 function Get-AesMicrosoftSourceIdentity {
     param([hashtable]$Environment)
     $hook = Get-AesMemberValue $script:AesTestBackend 'GetMicrosoftSourceIdentity'
@@ -298,11 +340,16 @@ function Get-AesMicrosoftSourceIdentity {
     $sddl = Get-AesSecuritySddl $Environment.TargetPath
     $registry = Get-AesRegistrySnapshot
     # The source is accepted only when the fixed Segoe UI Emoji mapping still
-    # points at this protected system file and its owner is TrustedInstaller.
+    # resolves to this protected system file and its owner is TrustedInstaller.
     # The exact bytes are then journaled as this machine/build's baseline.
-    $trustedInstaller = $sddl -match '^O:(TI|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)'
-    $fontMapping = [bool](Get-AesMemberValue $registry 'Exists' $false) -and ([string](Get-AesMemberValue $registry 'Value')).Equals('seguiemj.ttf', [StringComparison]::OrdinalIgnoreCase)
-    return @{ Accepted = ($hash -match '^[a-f0-9]{64}$' -and $trustedInstaller -and $fontMapping); Hash = $hash; Sddl = $sddl; Registry = $registry; OwnerTrustedInstaller = $trustedInstaller; MappingRetained = $fontMapping; Build = $Environment.Build; WindowsVersion = $Environment.WindowsVersion; KnownReferenceMatch = ($hash -eq $script:AesKnownLocalReferenceHash) }
+    $owner = Get-AesSddlOwner $sddl
+    $trustedInstaller = $owner -in @('TI', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $mapping = Test-AesFontRegistryTarget $Environment $registry
+    # The pinned Apple release deliberately keeps the original file descriptor
+    # when staged.  It must never become a new Windows-native baseline merely
+    # because its copied descriptor and registry mapping look legitimate.
+    $knownPinnedAppleOutput = ($hash -eq $script:AesExpectedAppleSourceHash)
+    return @{ Accepted = ($hash -match '^[a-f0-9]{64}$' -and -not $knownPinnedAppleOutput -and $trustedInstaller -and [bool]$mapping.Accepted); Hash = $hash; Sddl = $sddl; Registry = $registry; OwnerTrustedInstaller = $trustedInstaller; FontOwner = $owner; MappingRetained = [bool]$mapping.Accepted; MappingReason = [string]$mapping.Reason; FontRegistryValue = $mapping.Value; FontRegistryKind = $mapping.Kind; FontRegistryResolvedPath = $mapping.ResolvedPath; KnownPinnedAppleOutput = $knownPinnedAppleOutput; Build = $Environment.Build; WindowsVersion = $Environment.WindowsVersion; KnownReferenceMatch = ($hash -eq $script:AesKnownLocalReferenceHash) }
 }
 
 function Get-AesPendingEntries {
@@ -680,8 +727,73 @@ function New-AesBaseState {
         OriginalFont = if ($backup.Exists) { $paths.BackupFont } else { $Environment.TargetPath }
         BackupExists = [bool]$backup.Exists; BackupPath = if ($backup.Exists) { $paths.BackupFont } else { $null }
         InstallationMode = 'Unknown'; RenderVerificationPending = $false; RestartRequired = $false; Operation = $null; Message = $Reason
+        DiagnosticCode = $null; OriginalHash = $null; RecordedOutputHash = $null; FontRegistryValue = $null; FontOwner = $null
         VerificationPassed = $false; VerificationReason = ''
     }
+}
+
+function Set-AesStateIdentityEvidence {
+    param([hashtable]$State, $Identity)
+    if ($null -eq $Identity) { return }
+    $State.FontRegistryValue = Get-AesMemberValue $Identity 'FontRegistryValue'
+    if ($null -eq $State.FontRegistryValue) {
+        $registry = Get-AesMemberValue $Identity 'Registry'
+        $State.FontRegistryValue = Get-AesMemberValue $registry 'Value'
+    }
+    $State.FontOwner = Get-AesMemberValue $Identity 'FontOwner'
+}
+
+function Set-AesExternalDriftDiagnostics {
+    param(
+        [hashtable]$State,
+        $BackupInfo,
+        [string]$OriginalHash,
+        [string]$RecordedOutputHash,
+        $Identity,
+        [string]$IdentityError = ''
+    )
+    $State.Status = 'ExternalDrift'
+    $State.OriginalHash = $OriginalHash
+    $State.RecordedOutputHash = $RecordedOutputHash
+    Set-AesStateIdentityEvidence $State $Identity
+    $currentHash = [string]$State.CurrentHash
+    if ($currentHash -notmatch '^[a-f0-9]{64}$') {
+        $State.DiagnosticCode = 'FontMissing'
+        $State.Reason = "The Segoe UI Emoji target '$($State.CurrentFont)' is missing or unreadable; no SHA-256 can be compared."
+        return
+    }
+    if ([bool](Get-AesMemberValue $BackupInfo 'Valid' $false)) {
+        if ($RecordedOutputHash -match '^[a-fA-F0-9]{64}$') {
+            $State.DiagnosticCode = 'FontBytesChanged'
+            $State.Reason = "Current font SHA-256 '$currentHash' differs from verified original backup '$OriginalHash' and recorded transaction output '$RecordedOutputHash'."
+        } else {
+            $State.DiagnosticCode = 'MissingInstallRecord'
+            $State.Reason = "Current font SHA-256 '$currentHash' differs from verified original backup '$OriginalHash', and state.json has no valid installed output hash."
+        }
+        return
+    }
+    if ([bool](Get-AesMemberValue $Identity 'KnownPinnedAppleOutput' $false) -or $currentHash -eq $script:AesExpectedAppleSourceHash -or ($RecordedOutputHash -match '^[a-fA-F0-9]{64}$' -and $currentHash -eq $RecordedOutputHash.ToLowerInvariant())) {
+        $State.DiagnosticCode = 'MissingOriginalBackup'
+        $State.Reason = "Current font SHA-256 '$currentHash' is a known or recorded replacement, but no verified original backup exists."
+        return
+    }
+    if ($null -ne $Identity) {
+        if (-not [bool](Get-AesMemberValue $Identity 'OwnerTrustedInstaller' $false)) {
+            $State.DiagnosticCode = 'NativeOwnerUnrecognized'
+            $owner = [string](Get-AesMemberValue $Identity 'FontOwner')
+            $State.Reason = "Current font SHA-256 '$currentHash' has owner '$owner', not TrustedInstaller; no verified original backup or output record exists."
+            return
+        }
+        if (-not [bool](Get-AesMemberValue $Identity 'MappingRetained' $false)) {
+            $State.DiagnosticCode = 'NativeRegistrationMismatch'
+            $mappingReason = [string](Get-AesMemberValue $Identity 'MappingReason')
+            $State.Reason = "Current font SHA-256 '$currentHash' cannot establish a native baseline: $mappingReason"
+            return
+        }
+    }
+    $State.DiagnosticCode = 'MissingOriginalBackup'
+    $suffix = if ($IdentityError) { " Source identity inspection failed: $IdentityError" } else { '' }
+    $State.Reason = "Current font SHA-256 '$currentHash' has no verified original backup or recorded output.$suffix"
 }
 
 function Get-AesSystemState {
@@ -696,6 +808,12 @@ function Get-AesSystemState {
         $persistent = Read-AesJson $paths.State
         $backupInfo = Test-AesBackupMetadata $paths $environment
         $originalHash = if ($backupInfo.Valid) { [string](Get-AesMemberValue $backupInfo.Metadata 'originalHash') } else { $null }
+        $outputHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
+        if (-not $outputHash) { $outputHash = [string](Get-AesMemberValue $persistent 'outputHash') }
+        $state.OriginalHash = $originalHash
+        $state.RecordedOutputHash = $outputHash
+        $identity = $null
+        $identityError = ''
         if ($null -ne $journal -and -not [bool](Get-AesMemberValue $journal '__AesCorrupt' $false)) {
             $stage = [string](Get-AesMemberValue $journal 'stagePath')
             $target = [string](Get-AesMemberValue $journal 'targetPath')
@@ -724,16 +842,29 @@ function Get-AesSystemState {
         if ($null -ne $journal -and [bool](Get-AesMemberValue $journal '__AesCorrupt' $false)) { $state.Status = 'InterruptedTransaction'; $state.Reason = 'Transaction journal is corrupt.'; return $state }
         if ($state.BackupExists -and -not $backupInfo.Valid) { $state.Status = 'BackupCorrupt'; $state.Reason = $backupInfo.Reason; return $state }
         if (-not $originalHash -and -not $state.BackupExists) {
-            $identity = Get-AesMicrosoftSourceIdentity $environment
-            if ([bool]$identity.Accepted) { $originalHash = [string]$identity.Hash }
+            # A copied replacement can retain the original file descriptor and
+            # registry mapping.  Do not let a known/raw Apple file, or a font
+            # already recorded as tool output, become a new native baseline
+            # merely because ProgramData was removed.
+            $knownRecordedOutput = ($outputHash -match '^[a-fA-F0-9]{64}$' -and $state.CurrentHash -eq $outputHash.ToLowerInvariant())
+            if ($state.CurrentHash -ne $script:AesExpectedAppleSourceHash -and -not $knownRecordedOutput) {
+                try {
+                    $identity = Get-AesMicrosoftSourceIdentity $environment
+                    Set-AesStateIdentityEvidence $state $identity
+                    if ([bool]$identity.Accepted) { $originalHash = [string]$identity.Hash; $state.OriginalHash = $originalHash }
+                } catch { $identityError = $_.Exception.Message }
+            }
         }
         if ($originalHash -and $state.CurrentHash -eq $originalHash.ToLowerInvariant()) { $state.Status = if ($state.BackupExists) { 'OriginalWithBackup' } else { 'Original' }; $state.InstallationMode = 'Original'; return $state }
-        $outputHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
-        if (-not $outputHash) { $outputHash = [string](Get-AesMemberValue $persistent 'outputHash') }
         if ($state.BackupExists -and $outputHash -match '^[a-fA-F0-9]{64}$' -and $state.CurrentHash -eq $outputHash.ToLowerInvariant()) {
             $state.Status = 'Installed'; $state.InstallationMode = Get-AesInstallationMode $persistent $outputHash 'Installed'; $state.RenderVerificationPending = ($state.InstallationMode -eq 'Built'); return $state
         }
-        $state.Status = 'ExternalDrift'; $state.Reason = 'The current font is neither the verified original nor this transaction output.'; return $state
+        if ($null -eq $identity) {
+            try { $identity = Get-AesMicrosoftSourceIdentity $environment }
+            catch { $identityError = $_.Exception.Message }
+        }
+        Set-AesExternalDriftDiagnostics $state $backupInfo $originalHash $outputHash $identity $identityError
+        return $state
     } catch {
         return @{ Supported = $false; Reason = $_.Exception.Message; WindowsVersion = $null; Build = $null; Architecture = $null; IsElevated = $false; Status = 'Error'; CurrentFont = $null; CurrentHash = $null; OriginalFont = $null; BackupExists = $false; BackupPath = $null; InstallationMode = 'Unknown'; RenderVerificationPending = $false; RestartRequired = $false; Operation = $null; Message = $_.Exception.Message; VerificationPassed = $false; VerificationReason = $_.Exception.Message }
     }
@@ -882,6 +1013,11 @@ function Install-AesFont {
                 $oldAnchor = [string](Get-AesMemberValue $oldJournal 'anchorPath')
                 if ($oldAnchor -and (Test-Path -LiteralPath $oldAnchor -PathType Leaf)) { throw 'A previous boot finalizer has not restored its anchor yet.' }
             } else {
+                $recordedOutputHash = [string](Get-AesMemberValue $persistent 'installedOutputHash')
+                if (-not $recordedOutputHash) { $recordedOutputHash = [string](Get-AesMemberValue $persistent 'outputHash') }
+                if ($currentHash -eq $script:AesExpectedAppleSourceHash -or ($recordedOutputHash -match '^[a-fA-F0-9]{64}$' -and $currentHash -eq $recordedOutputHash.ToLowerInvariant())) {
+                    throw 'A replacement font is present but no verified original backup exists; install will not treat it as a native baseline.'
+                }
                 $identity = Get-AesMicrosoftSourceIdentity $environment
                 if (-not [bool]$identity.Accepted) { throw 'The current Segoe UI Emoji source is not a verified Microsoft/TrustedInstaller baseline.' }
                 if ($currentHash -ne [string]$identity.Hash) { throw 'The current target changed during baseline inspection.' }

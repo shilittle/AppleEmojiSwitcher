@@ -2,7 +2,7 @@
 . (Join-Path $PSScriptRoot '..\lib\Bootstrap.ps1')
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\AppleEmojiSwitcher.ps1'),[ref]$tokens,[ref]$errors)
-foreach($name in @('Get-AesStateValue','Get-AesCurrentFontLabel','Get-AesMutationResultStatus','Get-AesStatus','Assert-AesElevatedOutcome')) {
+foreach($name in @('Get-AesStateValue','Get-AesStateSummary','Get-AesCurrentFontLabel','Get-AesExternalDriftDetails','Get-AesMutationResultStatus','Get-AesStatus','Assert-AesElevatedOutcome')) {
     $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
     if($null -eq $node){throw ('Missing production function: '+$name)}
     . ([scriptblock]::Create($node.Extent.Text))
@@ -14,6 +14,30 @@ if($pending.Status -ne 'pending_reboot' -or -not $pending.PendingReboot){throw '
 if((Get-AesCurrentFontLabel @{Status='Installed';InstallationMode='Pinned'}) -ne '苹果 Emoji（极简原版）'){throw 'GUI incorrectly described a CLI installation as supplemented.'}
 if((Get-AesCurrentFontLabel @{Status='Installed';InstallationMode='Built'}) -ne '苹果 Emoji + 原生补齐'){throw 'GUI lost the full-font mode label.'}
 if((Get-AesCurrentFontLabel @{Status='PendingInstall';InstallationMode='Pinned'}) -ne 'Segoe UI Emoji（Windows 原生）'){throw 'GUI claimed a queued font was already active.'}
+if((Get-AesCurrentFontLabel @{Status='ExternalDrift'}) -ne '检测到外部字体改动'){throw 'GUI did not label an externally changed font.'}
+$driftState=[ordered]@{
+    Status='ExternalDrift'
+    CurrentFont='C:\Windows\Fonts\seguiemj.ttf'
+    CurrentHash=('a' * 64)
+    OriginalHash=('b' * 64)
+    RecordedOutputHash=('c' * 64)
+    FontRegistryValue='seguiemj.ttf'
+    FontOwner='TrustedInstaller'
+    DiagnosticCode='FontBytesChanged'
+    BackupPath='C:\ProgramData\AppleEmojiSwitcher\original\seguiemj.ttf'
+    Reason='Current font bytes differ from both recorded identities.'
+}
+$summary=Get-AesStateSummary -State $driftState
+foreach($field in @('CurrentFont','CurrentHash','OriginalHash','RecordedOutputHash','FontRegistryValue','FontOwner','DiagnosticCode','BackupPath')) {
+    if(-not $summary.Contains($field)){throw ('GUI status summary omitted ExternalDrift field: '+$field)}
+    if([string]$summary[$field] -ne [string]$driftState[$field]){throw ('GUI status summary changed ExternalDrift field: '+$field)}
+}
+$driftDetails=Get-AesExternalDriftDetails -State $driftState
+foreach($expected in @('实际字体路径：','实际字体 SHA-256：','原始备份 SHA-256：','记录输出 SHA-256：','字体注册值：','字体所有者：','诊断码：FontBytesChanged','原因：','请勿删除原始备份','Windows 更新','其他工具修改')) {
+    if($driftDetails -notmatch [regex]::Escape($expected)){throw ('GUI ExternalDrift details omitted: '+$expected)}
+}
+if((Get-AesExternalDriftDetails -State @{Status='Installed'}) -ne ''){throw 'GUI displayed drift details for a normal Installed state.'}
+if([string]::IsNullOrWhiteSpace((Get-AesExternalDriftDetails -State @{Status='ExternalDrift'}))){throw 'GUI failed to handle an ExternalDrift state with missing fields.'}
 $start=[DateTime]::UtcNow
 $script:childStatus=@{Timestamp=$start.AddSeconds(1).ToString('o');Action='Apply';Status='failed';Message='Actual queue verification error'}
 $script:StatusPath=[IO.Path]::GetTempFileName()

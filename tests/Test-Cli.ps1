@@ -42,6 +42,29 @@ try {
     Assert-AesCliTest ((Get-AesCliStateExitCode @{ Status = 'PendingInstall'; RestartRequired = $true }) -eq 3010) '待重启状态没有返回 3010。'
     Assert-AesCliTest ((Get-AesCliStateExitCode @{ Status = 'Denied' }) -eq 1) '事务拒绝没有返回失败码。'
 
+    $driftState = [ordered]@{
+        Status = 'ExternalDrift'
+        CurrentFont = 'C:\Windows\Fonts\seguiemj.ttf'
+        CurrentHash = ('a' * 64)
+        OriginalHash = ('b' * 64)
+        RecordedOutputHash = ('c' * 64)
+        FontRegistryValue = 'seguiemj.ttf'
+        FontOwner = 'TrustedInstaller'
+        DiagnosticCode = 'FontBytesChanged'
+        BackupPath = 'C:\ProgramData\AppleEmojiSwitcher\original\seguiemj.ttf'
+        BackupExists = $true
+        Reason = 'Current font bytes differ from both recorded identities.'
+    }
+    $driftDetails = Get-AesCliExternalDriftDetails -State $driftState
+    foreach ($expected in @('实际字体路径：', '实际字体 SHA-256：', '原始备份 SHA-256：', '记录输出 SHA-256：', '字体注册值：', '字体所有者：', '诊断码：FontBytesChanged', '原因：', '请勿删除原始备份', 'Windows 更新', '其他工具修改')) {
+        Assert-AesCliTest ($driftDetails -match [regex]::Escape($expected)) ('ExternalDrift 诊断缺少：' + $expected)
+    }
+    $emptyDriftDetails = Get-AesCliExternalDriftDetails -State @{ Status = 'ExternalDrift' }
+    Assert-AesCliTest ($emptyDriftDetails -match '请勿删除原始备份') '缺少字段的 ExternalDrift 没有保留安全提示。'
+    Assert-AesCliTest ((Get-AesCliExternalDriftDetails -State @{ Status = 'Installed' }) -eq '') '正常 Installed 状态错误显示了外部改动诊断。'
+    $driftVerifyMessage = Get-AesCliVerifyMessage -Verification @{ VerificationPassed = $false } -State $driftState
+    Assert-AesCliTest ($driftVerifyMessage -match '外部字体改动' -and $driftVerifyMessage -match '只读核验') 'verify 没有以中文说明 ExternalDrift 的只读诊断边界。'
+
     [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
 
     $reparseTarget = Join-Path $fixtureRoot 'reparse-target'
@@ -123,10 +146,12 @@ try {
     Assert-AesCliTest $mismatchRejected '不一致的管理员进程退出码被接受。'
 
     $cmdText = [IO.File]::ReadAllText((Join-Path $packageRoot 'aes.cmd'), [Text.Encoding]::ASCII)
+    $cliText = [IO.File]::ReadAllText($cliPath, [Text.Encoding]::UTF8)
     Assert-AesCliTest ($cmdText -match 'DisableDelayedExpansion') '启动器没有关闭延迟展开。'
     Assert-AesCliTest ($cmdText -match 'Sysnative') '启动器没有处理 32 位 cmd 到 x64 PowerShell 的路径。'
     Assert-AesCliTest ($cmdText -match 'pause') '无参数双击启动器没有保留结果窗口。'
     Assert-AesCliTest ($cmdText -match 'Exit code:' -and $cmdText -notmatch '退出码') '启动器退出提示没有保持 ASCII。'
+    Assert-AesCliTest ($cliText -notmatch '已验证备份存在') 'CLI status 仅凭 BackupExists 宣称备份已验证。'
 
     # Exercise the real CMD launcher from a path that includes Chinese, a
     # space, and !.  Both actions are read-only.  The copied subset mirrors

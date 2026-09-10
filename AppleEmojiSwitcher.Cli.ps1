@@ -188,6 +188,37 @@ function Get-AesCliStateLabel {
     }
 }
 
+function Get-AesCliExternalDriftDetails {
+    param($State)
+
+    if ([string](Get-AesCliValue -InputObject $State -Name 'Status' '') -ne 'ExternalDrift') {
+        return ''
+    }
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $fields = @(
+        @{ Name = 'CurrentFont'; Label = '实际字体路径' }
+        @{ Name = 'CurrentHash'; Label = '实际字体 SHA-256' }
+        @{ Name = 'OriginalHash'; Label = '原始备份 SHA-256' }
+        @{ Name = 'RecordedOutputHash'; Label = '记录输出 SHA-256' }
+        @{ Name = 'FontRegistryValue'; Label = '字体注册值' }
+        @{ Name = 'FontOwner'; Label = '字体所有者' }
+        @{ Name = 'DiagnosticCode'; Label = '诊断码' }
+        @{ Name = 'BackupPath'; Label = '原始备份路径' }
+    )
+    foreach ($field in $fields) {
+        $value = [string](Get-AesCliValue -InputObject $State -Name $field.Name '')
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $lines.Add(('{0}：{1}' -f $field.Label, $value))
+        }
+    }
+    $reason = [string](Get-AesCliValue -InputObject $State -Name 'Reason' '')
+    if (-not [string]::IsNullOrWhiteSpace($reason)) {
+        $lines.Add(('原因：{0}' -f $reason))
+    }
+    $lines.Add('请勿删除原始备份；如遇 Windows 更新或其他工具修改，请提供以上诊断输出。')
+    return ($lines -join [Environment]::NewLine)
+}
+
 function Show-AesCliState {
     param($State)
     if ($null -eq $State) {
@@ -196,13 +227,17 @@ function Show-AesCliState {
     }
     $system = '{0}，Build {1}，{2}' -f (Get-AesCliValue $State 'WindowsVersion' 'Windows'), (Get-AesCliValue $State 'Build' '?'), (Get-AesCliValue $State 'Architecture' '?')
     $mode = [string](Get-AesCliValue $State 'InstallationMode' 'Unknown')
-    $backup = if ([bool](Get-AesCliValue $State 'BackupExists' $false)) { '已验证备份存在' } else { '尚无备份' }
+    $backup = if ([bool](Get-AesCliValue $State 'BackupExists' $false)) { '资料存在' } else { '尚无备份' }
     Write-Host ('系统：{0}' -f $system)
     Write-Host ('状态：{0}' -f (Get-AesCliStateLabel -State $State))
     Write-Host ('安装模式：{0}' -f $mode)
     Write-Host ('备份：{0}' -f $backup)
     $reason = [string](Get-AesCliValue $State 'Reason' '')
     if (-not [string]::IsNullOrWhiteSpace($reason)) { Write-Host ('说明：{0}' -f $reason) }
+    $diagnostics = Get-AesCliExternalDriftDetails -State $State
+    if (-not [string]::IsNullOrWhiteSpace($diagnostics)) {
+        Write-Host ('诊断详情：' + [Environment]::NewLine + $diagnostics)
+    }
 }
 
 function Assert-AesCliSupportedState {
@@ -516,6 +551,9 @@ function Invoke-AesCliStatus {
 function Get-AesCliVerifyMessage {
     param($Verification, $State)
     if (Test-AesCliPendingState -State $State) { return '当前有待重启操作；重启后才能确认最终字体文件。' }
+    if ([string](Get-AesCliValue -InputObject $State -Name 'Status' '') -eq 'ExternalDrift') {
+        return '检测到外部字体改动；verify 只读核验文件、备份和权限，不会修改状态。请保留原始备份并提供诊断输出。'
+    }
     if ([bool](Get-AesCliValue $Verification 'VerificationPassed' $false)) { return '文件、备份与权限状态校验通过；CLI 未执行实际表情绘制验收。' }
     $reason = [string](Get-AesCliValue $Verification 'VerificationReason' '')
     if ([string]::IsNullOrWhiteSpace($reason)) { $reason = '校验模块未确认当前字体状态。' }

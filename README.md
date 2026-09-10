@@ -4,7 +4,7 @@
 
 ## 下载
 
-从 [v1.2.0 预览版](https://github.com/shilittle/AppleEmojiSwitcher/releases/tag/v1.2.0) 下载对应 ZIP 及 SHA-256。发布包不内置字体或 Python 运行时。
+从 [v1.2.1 预览版](https://github.com/shilittle/AppleEmojiSwitcher/releases/tag/v1.2.1) 下载对应 ZIP 及 SHA-256。发布包不内置字体或 Python 运行时。
 
 | 版本 | 特点 | 启动 |
 | --- | --- | --- |
@@ -25,6 +25,8 @@ CLI 无参数提供中文菜单，也支持 `install`、`restore`、`cancel`、`
 两版共用约 245 MiB 的字体缓存；GUI 另准备私有 Python 和固定依赖。缓存位于 `%LOCALAPPDATA%\AppleEmojiSwitcher\cache`，原始备份和事务资料位于 `%ProgramData%\AppleEmojiSwitcher`。工具不修改全局 Python、PATH 或系统代理。
 
 CLI 能恢复 GUI 已安装的字体，重复安装不会替换现有模式。切换完整／极简模式时，先恢复原生并重启。
+
+如果旧版首次运行出现 `ExternalDrift`，更新后重新运行 `aes.cmd status`：v1.2.1 修复了原生字体注册为完整路径或可展开路径时的误报。若仍提示外部改动，请保留原始备份并提供完整状态输出；Windows 更新、其他字体工具改动或安装记录缺失需要按实际哈希判断，不能通过删除备份消除报错。
 
 ## 兼容性说明
 

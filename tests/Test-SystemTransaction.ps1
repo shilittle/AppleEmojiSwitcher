@@ -31,6 +31,10 @@ $absentFinalizer = & $transactionModule {
     Test-AesFinalizerRegistered ('\AppleEmojiSwitcher-Finalize-' + [guid]::NewGuid().ToString('N'))
 }
 Assert-Equal $absentFinalizer $false 'An already removed finalizer must not make strict CLI verification fail'
+$wrappedRegistryPath = Join-Path $env:WINDIR 'Fonts\seguiemj.ttf'
+$convertedRegistryPath = & $transactionModule { param($value) ConvertTo-AesHashtable $value } $wrappedRegistryPath
+Assert-True ($convertedRegistryPath -is [string]) 'PSObject-wrapped registry path remains a string during transaction JSON conversion'
+Assert-Equal $convertedRegistryPath $wrappedRegistryPath 'transaction JSON conversion preserves a registry path string exactly'
 
 function New-IsolatedCase {
     param([switch]$FailStage, [switch]$FailQueue, [switch]$NativeMovePrefix, [switch]$TamperStage)
@@ -220,6 +224,120 @@ try {
     Assert-Equal $case.State.Pending.Count 4 'only the exact queued pair was removed'
     Assert-Equal $case.State.Security[$case.Target] 'O:BADG:BAD:(A;;FA;;;BA)' 'journaled security descriptor was restored'
     Assert-True (-not (Test-Path -LiteralPath $stage)) 'stage file was removed after cancellation'
+    $afterInstallCancel = Get-AesSystemState
+    Assert-Equal $afterInstallCancel.Status 'OriginalWithBackup' 'cancelled install returns to the verified original instead of drift'
+
+    # On a first run, Windows may register the system font with an exact
+    # absolute String path or an ExpandString path.  Both are equivalent to the
+    # normal bare filename, while foreign targets and unsupported registry kinds
+    # must remain fail-closed.
+    $bareCase = New-IsolatedCase; $cases.Add($bareCase)
+    $bareCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $bareCase.State.Security[$bareCase.Target] = 'O:TIG:SYD:PAI(A;;FA;;;SY)'
+    Use-IsolatedCase $bareCase
+    Assert-Equal (Get-AesSystemState).Status 'Original' 'default bare filename uses the real source-identity rules'
+    Assert-Equal $bareCase.State.QueueCount 0 'read-only native detection does not queue a transaction'
+
+    $absoluteCase = New-IsolatedCase; $cases.Add($absoluteCase)
+    $absoluteCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $absoluteCase.State.Security[$absoluteCase.Target] = 'O:TIG:SYD:PAI(A;;FA;;;SY)'
+    $absoluteValue = $absoluteCase.Target
+    $absoluteCase.Backend.GetFontRegistry = { return @{ Path = 'HKLM:\test-fonts'; Name = 'Segoe UI Emoji (TrueType)'; Exists = $true; Value = $absoluteValue; Kind = 'String' } }.GetNewClosure()
+    Use-IsolatedCase $absoluteCase
+    $absoluteState = Get-AesSystemState
+    Assert-Equal $absoluteState.Status 'Original' 'exact absolute String registry target is an accepted native baseline'
+    $absoluteInstall = Install-AesFont -FontPath $absoluteCase.Source -ReportPath $absoluteCase.Coverage
+    Assert-Equal $absoluteInstall.Status 'PendingInstall' 'first install accepts an exact absolute String registry target'
+    $absoluteBackupMetadata = Get-Content -Raw -LiteralPath (Join-Path $absoluteCase.Backend.Root 'backup\original.json') | ConvertFrom-Json
+    Assert-Equal $absoluteBackupMetadata.fontRegistry.Value $absoluteValue 'first install preserves the exact absolute registry value in backup metadata'
+    $absoluteCancel = Undo-AesPendingOperation
+    Assert-Equal $absoluteCancel.Status 'Cancelled' 'cancel works after first install with an absolute String registry target'
+    Assert-Equal (Get-AesSystemState).Status 'OriginalWithBackup' 'absolute String transaction cancellation keeps the verified original'
+
+    $expandCase = New-IsolatedCase; $cases.Add($expandCase)
+    $expandCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $expandCase.Backend.GetSecurity = { param($path) return 'O:TIG:SYD:PAI(A;;FA;;;SY)' }
+    $expandValue = '%TEMP%\' + (Split-Path -Leaf $expandCase.Root) + '\fake-windows\Fonts\seguiemj.ttf'
+    $expandCase.Backend.GetFontRegistry = { return @{ Path = 'HKLM:\test-fonts'; Name = 'Segoe UI Emoji (TrueType)'; Exists = $true; Value = $expandValue; Kind = 'ExpandString' } }.GetNewClosure()
+    Use-IsolatedCase $expandCase
+    Assert-Equal (Get-AesSystemState).Status 'Original' 'exact ExpandString registry target is an accepted native baseline'
+
+    $foreignRegistryCase = New-IsolatedCase; $cases.Add($foreignRegistryCase)
+    $foreignRegistryCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $foreignRegistryCase.Backend.GetSecurity = { param($path) return 'O:TIG:SYD:PAI(A;;FA;;;SY)' }
+    $foreignRegistryCase.Backend.GetFontRegistry = { return @{ Path = 'HKLM:\test-fonts'; Name = 'Segoe UI Emoji (TrueType)'; Exists = $true; Value = 'C:\foreign\seguiemj.ttf'; Kind = 'String' } }
+    Use-IsolatedCase $foreignRegistryCase
+    $foreignRegistryState = Get-AesSystemState
+    Assert-Equal $foreignRegistryState.Status 'ExternalDrift' 'foreign registry path remains external drift'
+    Assert-Equal $foreignRegistryState.DiagnosticCode 'NativeRegistrationMismatch' 'foreign registry path receives a specific read-only diagnostic'
+    $foreignRegistryInstall = Install-AesFont -FontPath $foreignRegistryCase.Source -ReportPath $foreignRegistryCase.Coverage
+    Assert-Equal $foreignRegistryInstall.Status 'Failed' 'foreign registry path cannot be accepted as a first-install baseline'
+    Assert-Equal $foreignRegistryCase.State.QueueCount 0 'foreign registry path never queues a replacement'
+
+    foreach ($driveRelativeValue in @('C:seguiemj.ttf', '\Windows\Fonts\seguiemj.ttf')) {
+        $driveRelativeCase = New-IsolatedCase; $cases.Add($driveRelativeCase)
+        $driveRelativeCase.Backend.Remove('GetMicrosoftSourceIdentity')
+        $driveRelativeCase.Backend.GetSecurity = { param($path) return 'O:TIG:SYD:PAI(A;;FA;;;SY)' }
+        $registryValue = $driveRelativeValue
+        $driveRelativeCase.Backend.GetFontRegistry = { return @{ Path = 'HKLM:\test-fonts'; Name = 'Segoe UI Emoji (TrueType)'; Exists = $true; Value = $registryValue; Kind = 'String' } }.GetNewClosure()
+        Use-IsolatedCase $driveRelativeCase
+        $driveRelativeState = Get-AesSystemState
+        Assert-Equal $driveRelativeState.Status 'ExternalDrift' "non-fully-qualified registry path '$driveRelativeValue' remains external drift"
+        Assert-Equal $driveRelativeState.DiagnosticCode 'NativeRegistrationMismatch' "non-fully-qualified registry path '$driveRelativeValue' receives a registration diagnostic"
+    }
+
+    $badKindCase = New-IsolatedCase; $cases.Add($badKindCase)
+    $badKindCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $badKindCase.Backend.GetSecurity = { param($path) return 'O:TIG:SYD:PAI(A;;FA;;;SY)' }
+    $badKindCase.Backend.GetFontRegistry = { return @{ Path = 'HKLM:\test-fonts'; Name = 'Segoe UI Emoji (TrueType)'; Exists = $true; Value = 'seguiemj.ttf'; Kind = 'MultiString' } }
+    Use-IsolatedCase $badKindCase
+    $badKindState = Get-AesSystemState
+    Assert-Equal $badKindState.Status 'ExternalDrift' 'unsupported registry kind remains external drift'
+    Assert-Equal $badKindState.DiagnosticCode 'NativeRegistrationMismatch' 'unsupported registry kind receives a specific diagnostic'
+
+    $ownerCase = New-IsolatedCase; $cases.Add($ownerCase)
+    $ownerCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $ownerCase.Backend.GetSecurity = { param($path) return 'O:BAG:SYD:PAI(A;;FA;;;SY)' }
+    Use-IsolatedCase $ownerCase
+    $ownerState = Get-AesSystemState
+    Assert-Equal $ownerState.Status 'ExternalDrift' 'non-TrustedInstaller source remains external drift'
+    Assert-Equal $ownerState.DiagnosticCode 'NativeOwnerUnrecognized' 'non-TrustedInstaller source receives a specific diagnostic'
+
+    $ownerPrefixCase = New-IsolatedCase; $cases.Add($ownerPrefixCase)
+    $ownerPrefixCase.Backend.Remove('GetMicrosoftSourceIdentity')
+    $ownerPrefixCase.Backend.GetSecurity = { param($path) return 'O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464-999G:SYD:PAI(A;;FA;;;SY)' }
+    Use-IsolatedCase $ownerPrefixCase
+    $ownerPrefixState = Get-AesSystemState
+    Assert-Equal $ownerPrefixState.Status 'ExternalDrift' 'TrustedInstaller SID prefix with an extra subauthority remains external drift'
+    Assert-Equal $ownerPrefixState.DiagnosticCode 'NativeOwnerUnrecognized' 'TrustedInstaller SID prefix with an extra subauthority is not accepted'
+
+    # A fixed Apple file or a recorded prior output without a backup is never
+    # permitted to become a new native baseline, even if it retains the original
+    # descriptor and mapping after ProgramData was removed.
+    $recordWithoutBackupCase = New-IsolatedCase; $cases.Add($recordWithoutBackupCase)
+    Copy-Item -LiteralPath $recordWithoutBackupCase.Source -Destination $recordWithoutBackupCase.Target -Force
+    [void][System.IO.Directory]::CreateDirectory($recordWithoutBackupCase.Backend.Root)
+    @{ schemaVersion = 1; status = 'Installed'; installedOutputHash = (Get-TestHash $recordWithoutBackupCase.Source) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $recordWithoutBackupCase.Backend.Root 'state.json') -Encoding utf8
+    Use-IsolatedCase $recordWithoutBackupCase
+    $recordWithoutBackupState = Get-AesSystemState
+    Assert-Equal $recordWithoutBackupState.Status 'ExternalDrift' 'recorded output without an original backup is not accepted as native'
+    Assert-Equal $recordWithoutBackupState.DiagnosticCode 'MissingOriginalBackup' 'recorded output without a backup identifies the missing evidence'
+    $recordWithoutBackupInstall = Install-AesFont -FontPath $recordWithoutBackupCase.Source -ReportPath $recordWithoutBackupCase.Coverage
+    Assert-Equal $recordWithoutBackupInstall.Status 'Failed' 'recorded output without a backup cannot be reinstalled as native'
+    Assert-Equal $recordWithoutBackupCase.State.QueueCount 0 'recorded output without a backup never queues a replacement'
+
+    $pinnedWithoutBackupCase = New-IsolatedCase; $cases.Add($pinnedWithoutBackupCase)
+    try {
+        Set-TestPinnedIdentity $pinnedWithoutBackupCase
+        Copy-Item -LiteralPath $pinnedWithoutBackupCase.Source -Destination $pinnedWithoutBackupCase.Target -Force
+        Use-IsolatedCase $pinnedWithoutBackupCase
+        $pinnedWithoutBackupState = Get-AesSystemState
+        Assert-Equal $pinnedWithoutBackupState.Status 'ExternalDrift' 'known pinned Apple bytes without an original backup are not accepted as native'
+        Assert-Equal $pinnedWithoutBackupState.DiagnosticCode 'MissingOriginalBackup' 'known pinned Apple bytes identify the missing original backup'
+        $pinnedWithoutBackupInstall = Install-AesFont -FontPath $pinnedWithoutBackupCase.Source -PinnedApple
+        Assert-Equal $pinnedWithoutBackupInstall.Status 'Failed' 'known pinned Apple bytes without a backup cannot be reinstalled as native'
+        Assert-Equal $pinnedWithoutBackupCase.State.QueueCount 0 'known pinned Apple bytes without a backup never queue a replacement'
+    } finally { Reset-TestPinnedIdentity }
 
     # A corrupt backup is a hard stop; it must not queue a new operation.
     $case = New-IsolatedCase; $cases.Add($case); Use-IsolatedCase $case
@@ -313,19 +431,42 @@ try {
     Assert-True ($null -eq $case.State.FinalizerTask) 'queue failure removes the registered finalizer'
     Assert-True (-not (Get-ChildItem -LiteralPath (Join-Path $case.Backend.Root 'anchor') -File -ErrorAction SilentlyContinue)) 'queue failure removes its restore anchor'
 
-    # A font which is neither the recorded output nor the verified original is
-    # external drift.  Restore must refuse to overwrite it.
+    # A Windows update after an older verified backup remains external drift.
+    # A current TrustedInstaller owner and valid native registry mapping do not
+    # authorize replacing the newer Windows bytes or silently rebasing backup.
     $case = New-IsolatedCase; $cases.Add($case); Use-IsolatedCase $case
     $backupDirectory = Join-Path $case.Backend.Root 'backup'; [void][System.IO.Directory]::CreateDirectory($backupDirectory)
     Copy-Item -LiteralPath $case.Target -Destination (Join-Path $backupDirectory 'seguiemj.ttf')
     @{ schemaVersion = 1; originalHash = $case.OriginalHash; originalSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; originalOwnerAndAclSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; fontRegistry = @{ Exists = $true }; targetPath = $case.Target; build = 22631 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupDirectory 'original.json') -Encoding utf8
     @{ schemaVersion = 1; status = 'Installed'; outputHash = (Get-TestHash $case.Source) } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $case.Backend.Root 'state.json') -Encoding utf8
     [System.IO.File]::WriteAllBytes($case.Target, [System.Text.Encoding]::UTF8.GetBytes('external Windows update font'))
+    $case.Backend.Remove('GetMicrosoftSourceIdentity')
+    $case.Backend.GetSecurity = { param($path) return 'O:TIG:SYD:PAI(A;;FA;;;SY)' }
+    $case.Backend.GetFontRegistry = { return @{ Path = 'HKLM:\test-fonts'; Name = 'Segoe UI Emoji (TrueType)'; Exists = $true; Value = 'seguiemj.ttf'; Kind = 'String' } }
+    Use-IsolatedCase $case
     $drift = Get-AesSystemState
     Assert-Equal $drift.Status 'ExternalDrift' 'external font is recognized as drift'
+    Assert-Equal $drift.DiagnosticCode 'FontBytesChanged' 'newer native bytes after an old backup are diagnosed without automatic acceptance'
+    Assert-Equal $drift.OriginalHash $case.OriginalHash 'drift reports the verified original backup hash'
+    Assert-Equal $drift.RecordedOutputHash (Get-TestHash $case.Source) 'drift reports the recorded transaction output hash'
     $restore = Restore-AesFont
     Assert-Equal $restore.Status 'Failed' 'restore refuses external drift'
     Assert-Equal $case.State.QueueCount 0 'external drift never queues restore'
+
+    $missingRecordCase = New-IsolatedCase; $cases.Add($missingRecordCase); Use-IsolatedCase $missingRecordCase
+    $backupDirectory = Join-Path $missingRecordCase.Backend.Root 'backup'; [void][System.IO.Directory]::CreateDirectory($backupDirectory)
+    Copy-Item -LiteralPath $missingRecordCase.Target -Destination (Join-Path $backupDirectory 'seguiemj.ttf')
+    @{ schemaVersion = 1; originalHash = $missingRecordCase.OriginalHash; originalSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; originalOwnerAndAclSddl = 'O:BADG:BAD:(A;;FA;;;BA)'; fontRegistry = @{ Exists = $true }; targetPath = $missingRecordCase.Target; build = 22631 } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupDirectory 'original.json') -Encoding utf8
+    Copy-Item -LiteralPath $missingRecordCase.Source -Destination $missingRecordCase.Target -Force
+    $missingRecord = Get-AesSystemState
+    Assert-Equal $missingRecord.Status 'ExternalDrift' 'replacement bytes without a state record remain external drift'
+    Assert-Equal $missingRecord.DiagnosticCode 'MissingInstallRecord' 'replacement bytes without a state record identify missing transaction evidence'
+
+    $missingFontCase = New-IsolatedCase; $cases.Add($missingFontCase); Use-IsolatedCase $missingFontCase
+    Remove-Item -LiteralPath $missingFontCase.Target -Force
+    $missingFont = Get-AesSystemState
+    Assert-Equal $missingFont.Status 'ExternalDrift' 'missing target remains external drift'
+    Assert-Equal $missingFont.DiagnosticCode 'FontMissing' 'missing target receives a specific diagnostic'
 
     # Verify-AesInstallation is read-only and checks the active bytes, the
     # immutable backup, and the original owner/group/DACL before declaring an

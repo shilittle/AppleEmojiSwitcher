@@ -109,7 +109,7 @@ function Get-AesStateSummary {
         return $null
     }
     $summary = [ordered]@{}
-    foreach ($name in @('Supported', 'Reason', 'WindowsVersion', 'Build', 'Architecture', 'IsElevated', 'Status', 'InstallationMode', 'CurrentFont', 'CurrentHash', 'OriginalFont', 'BackupExists', 'BackupPath', 'SourceVersion', 'RenderVerificationPending', 'RestartRequired')) {
+    foreach ($name in @('Supported', 'Reason', 'WindowsVersion', 'Build', 'Architecture', 'IsElevated', 'Status', 'InstallationMode', 'CurrentFont', 'CurrentHash', 'OriginalFont', 'BackupExists', 'BackupPath', 'OriginalHash', 'RecordedOutputHash', 'FontRegistryValue', 'FontOwner', 'DiagnosticCode', 'SourceVersion', 'RenderVerificationPending', 'RestartRequired')) {
         $summary[$name] = Get-AesProperty -InputObject $State -Name $name
     }
     return $summary
@@ -230,6 +230,7 @@ function Get-AesStateValue {
 function Get-AesCurrentFontLabel {
     param($State)
     $status = [string](Get-AesStateValue -State $State -Name 'Status')
+    if ($status -eq 'ExternalDrift') { return '检测到外部字体改动' }
     if ($status -in @('Installed','PendingRestore')) {
         if ([string](Get-AesStateValue -State $State -Name 'InstallationMode') -eq 'Pinned') { return '苹果 Emoji（极简原版）' }
         return '苹果 Emoji + 原生补齐'
@@ -238,6 +239,37 @@ function Get-AesCurrentFontLabel {
     $path = [string](Get-AesStateValue -State $State -Name 'CurrentFont')
     if ([string]::IsNullOrWhiteSpace($path)) { return '未读取' }
     return $path
+}
+
+function Get-AesExternalDriftDetails {
+    param($State)
+
+    if ([string](Get-AesStateValue -State $State -Name 'Status') -ne 'ExternalDrift') {
+        return ''
+    }
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    $fields = @(
+        @{ Name = 'CurrentFont'; Label = '实际字体路径' }
+        @{ Name = 'CurrentHash'; Label = '实际字体 SHA-256' }
+        @{ Name = 'OriginalHash'; Label = '原始备份 SHA-256' }
+        @{ Name = 'RecordedOutputHash'; Label = '记录输出 SHA-256' }
+        @{ Name = 'FontRegistryValue'; Label = '字体注册值' }
+        @{ Name = 'FontOwner'; Label = '字体所有者' }
+        @{ Name = 'DiagnosticCode'; Label = '诊断码' }
+        @{ Name = 'BackupPath'; Label = '原始备份路径' }
+    )
+    foreach ($field in $fields) {
+        $value = [string](Get-AesStateValue -State $State -Name $field.Name)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $lines.Add(('{0}：{1}' -f $field.Label, $value))
+        }
+    }
+    $reason = [string](Get-AesStateValue -State $State -Name 'Reason')
+    if (-not [string]::IsNullOrWhiteSpace($reason)) {
+        $lines.Add(('原因：{0}' -f $reason))
+    }
+    $lines.Add('请勿删除原始备份；如遇 Windows 更新或其他工具修改，请提供以上诊断输出。')
+    return ($lines -join [Environment]::NewLine)
 }
 
 function Test-AesSupported {
@@ -1076,7 +1108,14 @@ function Start-AesUi {
             if ([string]::IsNullOrWhiteSpace($font)) {
                 $font = '未读取'
             }
-            $fontText.ToolTip = $font + [Environment]::NewLine + 'SHA-256: ' + $hash
+            $tooltipLines = New-Object 'System.Collections.Generic.List[string]'
+            $tooltipLines.Add($font)
+            $tooltipLines.Add('SHA-256: ' + $hash)
+            $driftDetails = Get-AesExternalDriftDetails -State $state
+            if (-not [string]::IsNullOrWhiteSpace($driftDetails)) {
+                $tooltipLines.Add($driftDetails)
+            }
+            $fontText.ToolTip = $tooltipLines -join [Environment]::NewLine
             $currentStatus = [string](Get-AesStateValue -State $state -Name 'Status')
             $fontText.Text = Get-AesCurrentFontLabel -State $state
             $backupExists = [bool](Get-AesStateValue -State $state -Name 'BackupExists')
@@ -1101,6 +1140,9 @@ function Start-AesUi {
             }
             elseif (-not [string]::IsNullOrWhiteSpace($reason) -and -not [bool](Get-AesStateValue -State $state -Name 'Supported')) {
                 $statusText.Text = '系统不支持：' + $reason
+            }
+            elseif ($statusValue -eq 'ExternalDrift') {
+                $statusText.Text = '检测到外部字体改动。请勿删除原始备份；如遇 Windows 更新或其他工具修改，请提供诊断输出。'
             }
             elseif ($statusValue -match '(?i)^installed$' -and $renderPending -and -not (Test-AesUiBusy) -and -not $script:VerifyWorkerRequested) {
                 $script:VerifyWorkerRequested = $true

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "version": "1.2.0",
-  "testedOn": "2026-09-07",
+  "version": "1.2.1",
+  "testedOn": "2026-09-10",
   "platform": "Windows 11 Pro 23H2 x64, build 22631.6199",
   "tests": {
     "powershell51SuitesPassed": [
@@ -142,5 +142,24 @@
     "Manual per-application inspection in Edge, Notepad and emoji-panel input",
     "Real restore-to-native transaction followed by another reboot"
   ],
-  "note": "Full-font coverage and rendering results apply only to historical Built mode, not to the unmodified CLI font. Current tests preserve the already installed Built font. Public summary omits per-machine paths and account identifiers."
+  "note": "Full-font coverage and rendering results apply only to historical Built mode, not to the unmodified CLI font. Current tests preserve the already installed Built font. Public summary omits per-machine paths and account identifiers.",
+  "externalDriftFix": {
+    "scope": "Equivalent native font registration paths on first use",
+    "baselineIssueReproducedInIsolation": true,
+    "realMachineIssueReproduced": false,
+    "nativeRegistrationCases": [
+      "Bare filename",
+      "Absolute target path",
+      "ExpandString target path"
+    ],
+    "rejectedCases": [
+      "External font path",
+      "Invalid registry kind",
+      "Non-TrustedInstaller owner",
+      "Known Apple output without original backup",
+      "Changed font with existing backup"
+    ],
+    "diagnostics": "Actual font, original and recorded output hashes, registration value, owner, and reason code",
+    "systemFontOrRegistryMutationPerformed": false
+  }
 }
