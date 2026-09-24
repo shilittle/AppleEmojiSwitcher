@@ -27,4 +27,10 @@
 - [OpenType cmap](https://learn.microsoft.com/en-us/typography/opentype/spec/cmap)
 - [OpenType CBDT/CBLC](https://learn.microsoft.com/en-us/typography/opentype/spec/cbdt)
 
-所有可复现下载项的版本和哈希以 `fonts.lock.json` 为准。
+## v1.3.0 离线面板数据
+
+- [Unicode Emoji 18.0 完整序列](https://www.unicode.org/Public/18.0.0/emoji/emoji-test.txt)：3,963 个 fully-qualified 序列。
+- [CLDR 49.0.0-ALPHA2](https://github.com/unicode-org/cldr-json/releases/tag/49.0.0-ALPHA2)：固定预发布快照，仅用于中文、英文名称和检索词。
+- [Google Noto Emoji 固定提交](https://github.com/googlefonts/noto-emoji/tree/06121655d0e82f9cae6e7ba6feed4fa6fdbfc2a4)：为 Apple 字体缺少的候选提供预览图。
+
+字体安装与构建下载项以 `fonts.lock.json` 为准；面板目录的版本、来源与哈希以 `picker/data/sources.json` 为准，预览图片以 `picker/data/preview-report.json` 为准。README 对比图另见 `docs/images/windows-vs-apple.json`。

@@ -1,0 +1,231 @@
+{
+  "schemaVersion": 1,
+  "generator": {
+    "path": "scripts/generate-picker-catalog.py",
+    "version": "1"
+  },
+  "unicodeVersion": "18.0",
+  "sourceManifest": "picker/data/sources.json",
+  "sources": {
+    "unicode": {
+      "file": "picker/sources/emoji-test-18.0.0.txt",
+      "size": 671655,
+      "sha256": "8f3735cda1f92a779d78af67cf86066bb1f07143dc22f2ac29394d9bc57ab21a",
+      "url": "https://www.unicode.org/Public/18.0.0/emoji/emoji-test.txt",
+      "verified": true
+    },
+    "cldr": {
+      "zh": {
+        "file": "picker/sources/annotations-zh-49.0.0-alpha2.json",
+        "size": 422486,
+        "sha256": "3501b539f35b1d455b7809c4cf033644ea00b3009adecd921d743b97238df34b",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/49.0.0-ALPHA2/cldr-json/cldr-annotations-full/annotations/zh/annotations.json",
+        "verified": true
+      },
+      "en": {
+        "file": "picker/sources/annotations-en-49.0.0-alpha2.json",
+        "size": 440667,
+        "sha256": "ff5063110d8b5281f8a39962cc3580dee456825d228761291ce90325a480ff42",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/49.0.0-ALPHA2/cldr-json/cldr-annotations-full/annotations/en/annotations.json",
+        "verified": true
+      },
+      "zh-derived": {
+        "file": "picker/sources/annotationsDerived-zh-49.0.0-alpha2.json",
+        "size": 685122,
+        "sha256": "f1456acc9f1573520dcf44da849c3ba109142aa18754b845eb4061cf9c132e5b",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/49.0.0-ALPHA2/cldr-json/cldr-annotations-derived-full/annotationsDerived/zh/annotations.json",
+        "verified": true
+      },
+      "en-derived": {
+        "file": "picker/sources/annotationsDerived-en-49.0.0-alpha2.json",
+        "size": 785793,
+        "sha256": "7a8a5b33293128b1818dd3e0b3c7ce74ee380d29480f7886d48f85a2dbbcea5e",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/49.0.0-ALPHA2/cldr-json/cldr-annotations-derived-full/annotationsDerived/en/annotations.json",
+        "verified": true
+      }
+    }
+  },
+  "catalog": {
+    "path": "picker/data/catalog.tsv",
+    "sha256": "a78748132c0b7a124f884ebdffd1be3d137dc47dbbfb4f5f84537c7f6bf54941",
+    "size": 1326886,
+    "encoding": "UTF-8",
+    "newline": "LF",
+    "header": false,
+    "columns": [
+      "id",
+      "sequence",
+      "nameZh",
+      "nameEn",
+      "groupZh",
+      "version",
+      "keywords",
+      "previewKind"
+    ]
+  },
+  "counts": {
+    "fullyQualified": 3963,
+    "newInVersion": 19,
+    "groups": 9,
+    "componentRowsExcluded": 9,
+    "broadEmojiTotalIncludingComponents": 3972,
+    "previewKinds": {
+      "apple": 3941,
+      "noto": 22,
+      "system": 0
+    }
+  },
+  "catalogScope": "fully-qualified only; component rows are excluded by contract",
+  "latest": [
+    {
+      "id": "1FAEB",
+      "sequence": "🫫",
+      "nameZh": "裂开",
+      "nameEn": "cracking face"
+    },
+    {
+      "id": "1FAF9",
+      "sequence": "🫹",
+      "nameZh": "拇指左指",
+      "nameEn": "leftwards thumb sign"
+    },
+    {
+      "id": "1FAF9-1F3FB",
+      "sequence": "🫹🏻",
+      "nameZh": "拇指左指: 较浅肤色",
+      "nameEn": "leftwards thumb sign: light skin tone"
+    },
+    {
+      "id": "1FAF9-1F3FC",
+      "sequence": "🫹🏼",
+      "nameZh": "拇指左指: 中等-浅肤色",
+      "nameEn": "leftwards thumb sign: medium-light skin tone"
+    },
+    {
+      "id": "1FAF9-1F3FD",
+      "sequence": "🫹🏽",
+      "nameZh": "拇指左指: 中等肤色",
+      "nameEn": "leftwards thumb sign: medium skin tone"
+    },
+    {
+      "id": "1FAF9-1F3FE",
+      "sequence": "🫹🏾",
+      "nameZh": "拇指左指: 中等-深肤色",
+      "nameEn": "leftwards thumb sign: medium-dark skin tone"
+    },
+    {
+      "id": "1FAF9-1F3FF",
+      "sequence": "🫹🏿",
+      "nameZh": "拇指左指: 较深肤色",
+      "nameEn": "leftwards thumb sign: dark skin tone"
+    },
+    {
+      "id": "1FAFA",
+      "sequence": "🫺",
+      "nameZh": "拇指右指",
+      "nameEn": "rightwards thumb sign"
+    },
+    {
+      "id": "1FAFA-1F3FB",
+      "sequence": "🫺🏻",
+      "nameZh": "拇指右指: 较浅肤色",
+      "nameEn": "rightwards thumb sign: light skin tone"
+    },
+    {
+      "id": "1FAFA-1F3FC",
+      "sequence": "🫺🏼",
+      "nameZh": "拇指右指: 中等-浅肤色",
+      "nameEn": "rightwards thumb sign: medium-light skin tone"
+    },
+    {
+      "id": "1FAFA-1F3FD",
+      "sequence": "🫺🏽",
+      "nameZh": "拇指右指: 中等肤色",
+      "nameEn": "rightwards thumb sign: medium skin tone"
+    },
+    {
+      "id": "1FAFA-1F3FE",
+      "sequence": "🫺🏾",
+      "nameZh": "拇指右指: 中等-深肤色",
+      "nameEn": "rightwards thumb sign: medium-dark skin tone"
+    },
+    {
+      "id": "1FAFA-1F3FF",
+      "sequence": "🫺🏿",
+      "nameZh": "拇指右指: 较深肤色",
+      "nameEn": "rightwards thumb sign: dark skin tone"
+    },
+    {
+      "id": "1FACC",
+      "sequence": "🫌",
+      "nameZh": "帝王蝶",
+      "nameEn": "monarch butterfly"
+    },
+    {
+      "id": "1FADD",
+      "sequence": "🫝",
+      "nameZh": "酸黄瓜",
+      "nameEn": "pickle"
+    },
+    {
+      "id": "1F6D9",
+      "sequence": "🛙",
+      "nameZh": "灯塔",
+      "nameEn": "lighthouse"
+    },
+    {
+      "id": "1FA8B",
+      "sequence": "🪋",
+      "nameZh": "陨石",
+      "nameEn": "meteor"
+    },
+    {
+      "id": "1FA8C",
+      "sequence": "🪌",
+      "nameZh": "橡皮擦",
+      "nameEn": "eraser"
+    },
+    {
+      "id": "1FA8D",
+      "sequence": "🪍",
+      "nameZh": "抄网",
+      "nameEn": "net with handle"
+    }
+  ],
+  "missingLabels": {
+    "zh": [],
+    "en": []
+  },
+  "annotationSourceCounts": {
+    "zh-direct": 1597,
+    "zh-derived": 2366,
+    "en-direct": 1597,
+    "en-derived": 2366
+  },
+  "localTranslations": {
+    "groupZh": {
+      "Smileys & Emotion": "笑脸与情感",
+      "People & Body": "人物与身体",
+      "Component": "组件",
+      "Animals & Nature": "动物与自然",
+      "Food & Drink": "食物与饮料",
+      "Travel & Places": "旅行与地点",
+      "Activities": "活动",
+      "Objects": "物品",
+      "Symbols": "符号",
+      "Flags": "旗帜"
+    },
+    "source": "local-ui-translation; not CLDR official data"
+  },
+  "preview": {
+    "report": "picker/data/preview-report.json",
+    "restored": 3963,
+    "default": "system"
+  },
+  "validation": {
+    "idsUnique": true,
+    "sequencesUnique": true,
+    "latestCountMatchesUnicode": true,
+    "allFieldsControlFree": true
+  }
+}

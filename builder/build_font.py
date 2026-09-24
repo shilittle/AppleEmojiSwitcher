@@ -10,6 +10,7 @@ import copy
 import json
 import io
 import math
+import re
 import subprocess
 import sys
 import traceback
@@ -32,9 +33,34 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from font_audit import Entry, FontAudit, sha256, unicode_entries
 
-VERSION = "1.1.0"
+_VERSION_RE = re.compile(r"\A\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\Z")
+
+
+def read_repo_version(path: Path | None = None) -> str:
+    """Read and validate the package version used in reports and font names."""
+    version_path = path or (Path(__file__).resolve().parents[1] / "VERSION")
+    value = version_path.read_text(encoding="utf-8-sig").strip()
+    if not _VERSION_RE.fullmatch(value):
+        raise ValueError(f"VERSION 文件不是有效的语义版本号：{version_path}")
+    return value
+
+
+VERSION = read_repo_version()
 COMPATIBILITY_POLICY = "warn-on-local-display-differences-v1"
 APPLE_HASH = "18e48f1785564fbf511241e0963b265057bfe742036d8543406c6ce07e48ec0b"
+EMOJI17_AGE = "17.0"
+EMOJI17_SAMPLE_KEYS = (
+    "1FAEA",                              # distorted face
+    "1FAEF",                              # fight cloud
+    "1FAC8",                              # hairy creature
+    "1FACD",                              # orca
+    "1F6D8",                              # landslide
+    "1FA8A",                              # trombone
+    "1FA8E",                              # treasure chest
+    "1F9D1 200D 1FA70",                   # ballet dancer
+    "1F46F 1F3FB 200D 2642",             # minimally-qualified bunny ears
+    "1F9D1 1F3FB 200D 1FAEF 200D 1F9D1 1F3FC",  # multi-person sequence
+)
 
 
 def progress(stage: str, message: str, percent: int):
@@ -49,7 +75,96 @@ def write_json(path: Path, value):
 
 def entry_dict(entry, source, glyph=None):
     return {"codepoints": entry.key, "text": entry.text, "name": entry.name,
-            "qualification": entry.qualification, "source": source, "glyph": glyph}
+            "qualification": entry.qualification, "age": entry.age,
+            "source": source, "glyph": glyph}
+
+
+def _qualification_counts(entries):
+    """Summarize complete sequences without changing the legacy counts."""
+    counts = {
+        "total": len(entries),
+        "fullyQualified": sum(entry.qualification == "fully-qualified" for entry in entries),
+        "minimallyQualified": sum(entry.qualification == "minimally-qualified" for entry in entries),
+    }
+    counts["other"] = counts["total"] - counts["fullyQualified"] - counts["minimallyQualified"]
+    return counts
+
+
+def make_emoji17_summary(entries, source_entries):
+    """Create the additive Emoji 17.0 section for a coverage report.
+
+    ``source_entries`` is the already established legacy ``entries`` report
+    list.  Keeping the source mapping here makes the Apple-first decision
+    visible without replacing the existing top-level counts.
+    """
+    emoji17 = [entry for entry in entries if entry.age == EMOJI17_AGE]
+    source_by_key = {item.get("codepoints"): item.get("source") for item in source_entries}
+    original = {}
+    for source in ("apple", "native", "missing"):
+        original[source] = _qualification_counts(
+            [entry for entry in emoji17 if source_by_key.get(entry.key) == source]
+        )
+    return {
+        "version": EMOJI17_AGE,
+        "expected": _qualification_counts(emoji17),
+        "original": original,
+        "candidate": {
+            "shape": {
+                "status": "not-run",
+                "checked": 0,
+                "supported": 0,
+                "missing": 0,
+                "supportedByQualification": {"fullyQualified": 0, "minimallyQualified": 0},
+                "missingByQualification": {"fullyQualified": 0, "minimallyQualified": 0},
+            },
+            "windowsRendering": {
+                "status": "not-run",
+                "checked": 0,
+                "matched": 0,
+                "mismatched": 0,
+                "unrendered": len(emoji17),
+            },
+        },
+        "preview": {"sampleCount": 0, "sampleCodepoints": []},
+        "inputPanel": {
+            "status": "not-run",
+            "reason": "字体构建只验证成形和绘制；不证明 Win＋句号面板已经列出或可以输入这些表情。",
+        },
+    }
+
+
+def update_emoji17_shape(summary, entries, support):
+    """Record candidate HarfBuzz/FontAudit shaping separately from rendering."""
+    emoji17 = [entry for entry in entries if entry.age == EMOJI17_AGE]
+    supported = [entry for entry in emoji17 if support.get(entry.points, (False, None))[0]]
+    missing = [entry for entry in emoji17 if entry not in supported]
+    summary["candidate"]["shape"] = {
+        "status": "passed" if not missing else "failed",
+        "checked": len(emoji17),
+        "supported": len(supported),
+        "missing": len(missing),
+        "supportedByQualification": _qualification_counts(supported),
+        "missingByQualification": _qualification_counts(missing),
+    }
+
+
+def update_emoji17_render(summary, render_entries, mismatches):
+    """Record actual Windows rendering independently of HarfBuzz shaping."""
+    emoji17 = [entry for entry in render_entries if entry.age == EMOJI17_AGE]
+    emoji17_keys = {entry.key for entry in emoji17}
+    mismatch_keys = {item.get("codepoints") for item in mismatches if item.get("codepoints") in emoji17_keys}
+    expected = summary["expected"]["total"]
+    checked = len(emoji17)
+    unrendered = max(0, expected - checked)
+    matched = max(0, checked - len(mismatch_keys))
+    status = "passed" if not mismatch_keys and unrendered == 0 else ("warning" if mismatch_keys else "incomplete")
+    summary["candidate"]["windowsRendering"] = {
+        "status": status,
+        "checked": checked,
+        "matched": matched,
+        "mismatched": len(mismatch_keys),
+        "unrendered": unrendered,
+    }
 
 
 def check_assets(apple: Path, unicode_dir: Path):
@@ -301,7 +416,7 @@ def smoke_entries(entries, apple_support, windows_support):
     desired = ["1F600", "1FAE8", "1F1E8 1F1F3", "1F468 1F3FD 200D 1F4BB",
                "1F469 200D 2764 FE0F 200D 1F48B 200D 1F468", "0023 FE0F 20E3",
                "1F3F4 E0067 E0062 E0065 E006E E0067 E007F", "2764 FE0F", "2764 FE0E",
-               "2665 FE0F", "2665 FE0E", "00A9 FE0F", "00A9 FE0E"]
+               "2665 FE0F", "2665 FE0E", "00A9 FE0F", "00A9 FE0E", *EMOJI17_SAMPLE_KEYS]
     by_key = {entry.key: entry for entry in entries}
     return [by_key[key] for key in desired if key in by_key
             and (apple_support[by_key[key].points][0] or windows_support[by_key[key].points][0])]
@@ -313,15 +428,23 @@ def make_preview(output, entries, rendered, report):
     for entry in entries:
         image = rendered[entry.points][32]
         relative = Path(image["path"]).relative_to(output).as_posix()
-        cards.append(f'<div class="card"><img src="{html.escape(relative)}"><code>{entry.key}</code></div>')
+        label = html.escape(entry.name or entry.key)
+        cards.append(f'<div class="card"><img src="{html.escape(relative)}"><span><strong>{label}</strong><code>{entry.key}</code></span></div>')
     counts = report["counts"]
+    emoji17 = report.get("emoji17", {})
+    expected = emoji17.get("expected", {})
+    preview = emoji17.get("preview", {})
+    shape = emoji17.get("candidate", {}).get("shape", {})
+    rendering = emoji17.get("candidate", {}).get("windowsRendering", {})
     page = f'''<!doctype html><meta charset="utf-8"><title>Emoji 字体验证</title>
 <style>body{{font:16px "Segoe UI","Microsoft YaHei",sans-serif;max-width:1000px;margin:40px auto;background:#f5f6fa;color:#253047}}
-h1{{font-size:26px}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}}.card{{background:white;border-radius:12px;padding:18px;display:flex;align-items:center;gap:12px}}img{{width:auto;height:32px}}code{{font-size:11px;word-break:break-all}}p{{line-height:1.8}}</style>
+h1{{font-size:26px}}.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}}.card{{background:white;border-radius:12px;padding:18px;display:flex;align-items:center;gap:12px}}.card span{{display:flex;flex-direction:column;gap:4px}}img{{width:auto;height:32px}}code{{font-size:11px;word-break:break-all}}p{{line-height:1.8}}</style>
 <h1>苹果 Emoji 候选字体验证</h1><p>这些图片由 Windows 私有加载候选字体后实际渲染。是否允许替换以完整报告中的检查结果为准；系统替换仍需重启后确认。</p>
 <p>实际组合显示检查：{html.escape(str(report['checks'].get('nativeSequenceRegression', '尚未完成')))}。
 不一致项目：{html.escape('；'.join(item['codepoints'] for item in report.get('nativeSequenceMismatches', [])) or '无')}。</p>
 <p>苹果覆盖：{counts['apple']}　原生补齐：{counts['native']}　双方缺失：{counts['missing']}　保留文字形态：{counts['textPreserved']}</p>
+<p>Emoji 17.0：{expected.get('fullyQualified', 0)} 个正式序列，{expected.get('minimallyQualified', 0)} 个简化序列；专项预览 {preview.get('sampleCount', 0)} 项。候选成形：{html.escape(str(shape.get('status', '尚未完成')))}（{shape.get('supported', 0)}/{shape.get('checked', 0)}）；Windows 实际绘制：{html.escape(str(rendering.get('status', '尚未完成')))}（匹配 {rendering.get('matched', 0)}，不匹配 {rendering.get('mismatched', 0)}，未绘制 {rendering.get('unrendered', 0)}）。</p>
+<p>Win＋句号输入面板：尚未验收。字体能够绘制新表情，不代表系统输入面板已经更新目录。</p>
 <div class="grid">{''.join(cards)}</div><p>完整列表见 <a href="coverage.json">表情覆盖报告</a>。</p>'''
     (output / "preview.html").write_text(page, encoding="utf-8")
 
@@ -368,6 +491,7 @@ def build(args):
         rgi_entries = [entry for entry in entries if entry.qualification in ("fully-qualified", "component")]
         report["counts"]["rgiTotal"] = len(rgi_entries)
         report["counts"]["rgiMissing"] = sum(not a_support[e.points][0] and not w_support[e.points][0] for e in rgi_entries)
+        report["emoji17"] = make_emoji17_summary(entries, report["entries"])
         report["notes"] = [
             "统计单位为完整 Unicode 字符串；包含不同呈现方式，不等于独立图案数。",
             "数字、井号、星号单独加 FE0F 的变体可能没有独立彩色图案；完整键帽组合另行检查。"
@@ -427,6 +551,7 @@ def build(args):
         progress("validate", "回读候选字体并检查所有表情组合", 65)
         built = FontAudit(candidate, strict_strikes=True)
         out_support = built.classify(entries)
+        update_emoji17_shape(report["emoji17"], entries, out_support)
         errors = []
         for entry in entries:
             a_ok, a_name = a_support[entry.points]
@@ -492,6 +617,12 @@ def build(args):
         report["checks"]["nativeRenderedSequenceCount"] = len(render_entries)
         report["checks"]["nativeMatchingSequenceCount"] = len(render_entries) - len(mismatches)
         report["checks"]["nativeSequenceRegression"] = "warning" if mismatches else "passed"
+        update_emoji17_render(report["emoji17"], render_entries, mismatches)
+        emoji17_preview = [entry for entry in samples if entry.age == EMOJI17_AGE]
+        report["emoji17"]["preview"] = {
+            "sampleCount": len(emoji17_preview),
+            "sampleCodepoints": [entry.key for entry in emoji17_preview],
+        }
         make_preview(output, samples, rendered, report)
         if mismatches:
             tag_flags = {

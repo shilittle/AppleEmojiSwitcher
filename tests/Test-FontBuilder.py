@@ -38,7 +38,7 @@ from fontTools.ttLib.tables.E_B_L_C_ import (
 from PIL import Image
 
 import build_font
-from font_audit import Entry, FontAudit, sha256
+from font_audit import Entry, FontAudit, parse_emoji_age, sha256, unicode_entries
 
 
 TEST_ROOT = Path(tempfile.gettempdir()) / "AppleEmojiSwitcher-font-tests"
@@ -215,6 +215,80 @@ class FontBuilderFixtures(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_emoji_age_parsing_and_legacy_entry_constructor(self):
+        """Emoji ages come from the pinned comment without breaking old Entry calls."""
+        legacy = Entry((0x2764,), "heart", "fully-qualified")
+        self.assertEqual(legacy.age, "")
+        self.assertEqual(parse_emoji_age("🫪 E17.0 distorted face"), "17.0")
+        self.assertEqual(parse_emoji_age("no emoji age here"), "")
+
+        unicode_root = self.root / "unicode"
+        unicode_root.mkdir()
+        (unicode_root / "emoji-test.txt").write_text(
+            "1FAEA ; fully-qualified # 🫪 E17.0 distorted face\n"
+            "1FAEF ; minimally-qualified # 🫯 E17.0 fight cloud\n"
+            "2764 FE0F ; fully-qualified # ❤️ E0.6 red heart\n",
+            encoding="utf-8",
+        )
+        for filename in ("emoji-sequences.txt", "emoji-zwj-sequences.txt", "emoji-variation-sequences.txt"):
+            (unicode_root / filename).write_text("# fixture\n", encoding="utf-8")
+
+        entries = {entry.key: entry for entry in unicode_entries(unicode_root)}
+        self.assertEqual(entries["1FAEA"].age, "17.0")
+        self.assertEqual(entries["1FAEF"].age, "17.0")
+        self.assertEqual(entries["2764 FE0F"].age, "0.6")
+        self.assertEqual(entries["1FAEF"].qualification, "minimally-qualified")
+
+    def test_emoji17_summary_distinguishes_source_shape_and_rendering(self):
+        """The additive report separates source selection, shaping, and Windows paint."""
+        entries = [
+            Entry((0x1FAEA,), "distorted face", "fully-qualified", "17.0"),
+            Entry((0x1FAEF,), "fight cloud", "minimally-qualified", "17.0"),
+            Entry((0x1FAC8,), "hairy creature", "fully-qualified", "17.0"),
+            Entry((0x1F600,), "grinning face", "fully-qualified", "1.0"),
+        ]
+        rows = [
+            build_font.entry_dict(entries[0], "apple", "apple.glyph"),
+            build_font.entry_dict(entries[1], "native", "native.glyph"),
+            build_font.entry_dict(entries[2], "missing"),
+            build_font.entry_dict(entries[3], "apple", "old.glyph"),
+        ]
+        summary = build_font.make_emoji17_summary(entries, rows)
+        self.assertEqual(summary["expected"]["total"], 3)
+        self.assertEqual(summary["expected"]["fullyQualified"], 2)
+        self.assertEqual(summary["expected"]["minimallyQualified"], 1)
+        self.assertEqual(summary["original"]["apple"]["total"], 1)
+        self.assertEqual(summary["original"]["native"]["total"], 1)
+        self.assertEqual(summary["original"]["missing"]["total"], 1)
+        self.assertEqual(summary["candidate"]["shape"]["status"], "not-run")
+
+        support = {entry.points: (entry.points != entries[2].points, "candidate.glyph") for entry in entries}
+        build_font.update_emoji17_shape(summary, entries, support)
+        self.assertEqual(summary["candidate"]["shape"]["checked"], 3)
+        self.assertEqual(summary["candidate"]["shape"]["supported"], 2)
+        self.assertEqual(summary["candidate"]["shape"]["missing"], 1)
+        self.assertEqual(summary["candidate"]["shape"]["status"], "failed")
+
+        build_font.update_emoji17_render(
+            summary,
+            entries[:2],
+            [{"codepoints": entries[1].key}],
+        )
+        rendering = summary["candidate"]["windowsRendering"]
+        self.assertEqual(rendering["checked"], 2)
+        self.assertEqual(rendering["matched"], 1)
+        self.assertEqual(rendering["mismatched"], 1)
+        self.assertEqual(rendering["unrendered"], 1)
+        self.assertEqual(rendering["status"], "warning")
+
+    def test_builder_version_is_read_from_validated_repo_file(self):
+        """Reports and generated font names follow VERSION instead of stale code."""
+        self.assertEqual(build_font.VERSION, (PACKAGE_ROOT / "VERSION").read_text(encoding="utf-8-sig").strip())
+        bad = self.root / "VERSION"
+        bad.write_text("1.3", encoding="ascii")
+        with self.assertRaisesRegex(ValueError, "语义版本号"):
+            build_font.read_repo_version(bad)
 
     def test_cmap_components_without_gsub_are_unsupported(self):
         """Two individually mapped color glyphs do not imply a sequence."""

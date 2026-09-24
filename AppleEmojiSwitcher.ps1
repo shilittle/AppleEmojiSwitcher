@@ -38,6 +38,12 @@ if (Test-Path -LiteralPath $displayVerifierPath -PathType Leaf) {
     # it to that function's local scope and lose it on return.
     . $displayVerifierPath
 }
+$panelModulePath = Join-Path $script:PackageRoot 'lib\Panel.ps1'
+if (Test-Path -LiteralPath $panelModulePath -PathType Leaf) {
+    # Panel actions are an optional user-scope extension.  They share only
+    # controller selection/JSON handling and never load the font transaction.
+    . $panelModulePath
+}
 
 function Get-AesUiRoot {
     param([string]$RequestedRoot)
@@ -62,6 +68,8 @@ $script:MainWindow = $null
 $script:VerifyWorkerRequested = $false
 $script:LastUiStateRefresh = [DateTime]::MinValue
 $script:LastBuildCoveragePath = $null
+$script:PanelAction = $null
+$script:PanelStatusTextControl = $null
 
 function Initialize-AesAppDirectories {
     [IO.Directory]::CreateDirectory($script:DataRoot) | Out-Null
@@ -888,6 +896,68 @@ function Start-AesBackgroundAction {
     return $process
 }
 
+function Get-AesPanelActionLogRoot {
+    Initialize-AesAppDirectories
+    $root = Join-Path $script:DataRoot 'panel'
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    return $root
+}
+
+function Start-AesPanelUiAction {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('enable', 'disable', 'status')][string]$Command
+    )
+    if ($null -ne $script:PanelAction -and $null -ne $script:PanelAction.Process -and -not $script:PanelAction.Process.HasExited) {
+        if ($null -ne $script:PanelStatusTextControl) { $script:PanelStatusTextControl.Text = '已有面板操作正在运行，请等待其结束。' }
+        return
+    }
+    if (-not (Get-Command -Name Start-AesPanelControllerProcess -ErrorAction SilentlyContinue)) {
+        if ($null -ne $script:PanelStatusTextControl) { $script:PanelStatusTextControl.Text = '面板模块不可用，无法启动面板操作。' }
+        return
+    }
+    try {
+        $logRoot = Get-AesPanelActionLogRoot
+        $id = [Guid]::NewGuid().ToString('N')
+        $outputPath = Join-Path $logRoot ($id + '.out')
+        $errorPath = Join-Path $logRoot ($id + '.err')
+        $cachePath = if ([string]::IsNullOrWhiteSpace($PackageRoot)) { $script:PackageRoot } else { [IO.Path]::GetFullPath($PackageRoot) }
+        $script:PanelAction = Start-AesPanelControllerProcess -Command $Command -PackageRoot $cachePath -OutputPath $outputPath -ErrorPath $errorPath
+        if ($null -ne $script:PanelStatusTextControl) {
+            $script:PanelStatusTextControl.Text = ('正在执行面板操作“{0}”…`r`n不会修改字体事务；可用 Win + . 打开独立增强面板。' -f $Command)
+        }
+    }
+    catch {
+        $script:PanelAction = $null
+        if ($null -ne $script:PanelStatusTextControl) { $script:PanelStatusTextControl.Text = '启动面板操作失败：' + $_.Exception.Message }
+    }
+}
+
+function Update-AesPanelUiAction {
+    if ($null -eq $script:PanelAction -or $null -eq $script:PanelAction.Process) { return }
+    $process = $script:PanelAction.Process
+    if (-not $process.HasExited) { return }
+    try {
+        $raw = ''
+        if (Test-Path -LiteralPath $script:PanelAction.OutputPath -PathType Leaf) {
+            $raw = [IO.File]::ReadAllText($script:PanelAction.OutputPath, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        if ([string]::IsNullOrWhiteSpace($raw) -and (Test-Path -LiteralPath $script:PanelAction.ErrorPath -PathType Leaf)) {
+            $raw = [IO.File]::ReadAllText($script:PanelAction.ErrorPath, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        $result = ConvertFrom-AesPanelJson -Command $script:PanelAction.Command -RawOutput $raw -ProcessExitCode $process.ExitCode -ControllerPath $script:PanelAction.ControllerPath
+        if ($null -ne $script:PanelStatusTextControl) {
+            $script:PanelStatusTextControl.Text = Format-AesPanelResultMessage -Result $result
+        }
+    }
+    catch {
+        if ($null -ne $script:PanelStatusTextControl) { $script:PanelStatusTextControl.Text = '读取面板结果失败：' + $_.Exception.Message }
+    }
+    finally {
+        $process.Dispose()
+        $script:PanelAction = $null
+    }
+}
+
 function Get-AesOperatingSystemText {
     $name = 'Windows'
     $build = [string][Environment]::OSVersion.Version.Build
@@ -958,6 +1028,7 @@ function Show-AesTextDialog {
     $dialog.Height = 600
     $dialog.WindowStartupLocation = [Windows.WindowStartupLocation]::CenterOwner
     $dialog.Owner = $script:MainWindow
+    $dialog.Background = [Windows.Media.BrushConverter]::new().ConvertFromString('#F5F6F8')
     $box = New-Object Windows.Controls.TextBox
     $box.Text = $Text
     $box.IsReadOnly = $true
@@ -966,7 +1037,9 @@ function Show-AesTextDialog {
     $box.TextWrapping = [Windows.TextWrapping]::NoWrap
     $box.VerticalScrollBarVisibility = [Windows.Controls.ScrollBarVisibility]::Auto
     $box.HorizontalScrollBarVisibility = [Windows.Controls.ScrollBarVisibility]::Auto
-    $box.Margin = New-Object Windows.Thickness(8)
+    $box.Margin = New-Object Windows.Thickness(12)
+    $box.Padding = New-Object Windows.Thickness(10, 8, 10, 8)
+    $box.BorderBrush = [Windows.Media.BrushConverter]::new().ConvertFromString('#E5E7EB')
     $dialog.Content = $box
     $dialog.ShowDialog() | Out-Null
 }
@@ -1026,56 +1099,184 @@ function Start-AesUi {
     $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="苹果 Emoji 一键切换" Width="820" Height="560" MinWidth="760" MinHeight="480"
-        WindowStartupLocation="CenterScreen" Background="#FFF7F7F7">
-  <Grid Margin="16">
+        Title="苹果 Emoji 一键切换" Width="840" Height="720" MinWidth="660" MinHeight="500"
+        WindowStartupLocation="CenterScreen" Background="#F5F6F8"
+        FontFamily="Microsoft YaHei UI" FontSize="13" UseLayoutRounding="True" SnapsToDevicePixels="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="AccentBrush" Color="#2563EB" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#1D4ED8" />
+    <SolidColorBrush x:Key="AccentPressedBrush" Color="#1E40AF" />
+    <SolidColorBrush x:Key="CardBrush" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="CardBorderBrush" Color="#E5E7EB" />
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#1F2937" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#6B7280" />
+    <SolidColorBrush x:Key="ButtonBorderBrush" Color="#D1D5DB" />
+    <SolidColorBrush x:Key="ButtonHoverBrush" Color="#EFF4FF" />
+    <SolidColorBrush x:Key="ButtonPressedBrush" Color="#DBE7FE" />
+    <SolidColorBrush x:Key="DisabledBackgroundBrush" Color="#F3F4F6" />
+    <SolidColorBrush x:Key="DisabledForegroundBrush" Color="#9CA3AF" />
+    <Style TargetType="Button">
+      <Setter Property="MinHeight" Value="32" />
+      <Setter Property="Padding" Value="14,6" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource ButtonBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border CornerRadius="6" SnapsToDevicePixels="True"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}">
+              <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{StaticResource ButtonHoverBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{StaticResource ButtonPressedBrush}" />
+              </Trigger>
+              <Trigger Property="IsFocused" Value="True">
+                <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Background" Value="{StaticResource DisabledBackgroundBrush}" />
+                <Setter Property="Foreground" Value="{StaticResource DisabledForegroundBrush}" />
+                <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+          <Setter Property="BorderBrush" Value="{StaticResource AccentHoverBrush}" />
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
+          <Setter Property="BorderBrush" Value="{StaticResource AccentPressedBrush}" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="CardStyle" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource CardBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Padding" Value="16,12" />
+      <Setter Property="Margin" Value="0,0,0,10" />
+    </Style>
+    <Style x:Key="CardTitleStyle" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+      <Setter Property="Margin" Value="0,0,0,8" />
+    </Style>
+    <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+      <Setter Property="Margin" Value="0,1,12,6" />
+    </Style>
+    <Style x:Key="FieldValueStyle" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+      <Setter Property="Margin" Value="0,1,0,6" />
+    </Style>
+  </Window.Resources>
+  <Grid Margin="20,18">
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto" />
-      <RowDefinition Height="Auto" />
-      <RowDefinition Height="Auto" />
-      <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
-    <TextBlock Grid.Row="0" Text="苹果 Emoji 一键切换" FontSize="24" FontWeight="SemiBold" Margin="0,0,0,14" />
-    <Grid Grid.Row="1" Margin="0,0,0,6">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-      <TextBlock Grid.Column="0" Text="操作系统" FontWeight="SemiBold" />
-      <TextBlock x:Name="OsText" Grid.Column="1" Text="读取中…" TextWrapping="Wrap" />
-    </Grid>
-    <Grid Grid.Row="2" Margin="0,0,0,6">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-      <TextBlock Grid.Column="0" Text="当前字体" FontWeight="SemiBold" />
-      <TextBlock x:Name="FontText" Grid.Column="1" Text="读取中…" TextWrapping="Wrap" />
-    </Grid>
-    <Grid Grid.Row="3" Margin="0,0,0,6">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-      <TextBlock Grid.Column="0" Text="目标版本" FontWeight="SemiBold" />
-      <TextBlock x:Name="VersionText" Grid.Column="1" Text="读取中…" />
-    </Grid>
-    <Grid Grid.Row="4" Margin="0,0,0,10">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-      <TextBlock Grid.Column="0" Text="备份" FontWeight="SemiBold" />
-      <TextBlock x:Name="BackupText" Grid.Column="1" Text="读取中…" TextWrapping="Wrap" />
-    </Grid>
-    <Grid Grid.Row="5">
-      <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-      <Grid Grid.Row="0" Margin="0,0,0,8">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-        <ProgressBar x:Name="ProgressBar" Grid.Column="0" Height="18" Minimum="0" Maximum="100" Value="0" />
-        <TextBlock x:Name="ProgressText" Grid.Column="1" Width="230" Margin="12,0,0,0" Text="就绪" VerticalAlignment="Center" />
-      </Grid>
-      <TextBox x:Name="StatusText" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" BorderBrush="#FFD0D0D0" Background="White" Padding="8" />
-    </Grid>
-    <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
-      <Button x:Name="ApplyButton" Content="一键替换" Width="104" Margin="0,0,8,0" Padding="8,5" />
-      <Button x:Name="RestoreButton" Content="恢复原生" Width="104" Margin="0,0,8,0" Padding="8,5" />
-      <Button x:Name="CancelButton" Content="取消待重启操作" Width="132" Margin="0,0,8,0" Padding="8,5" />
-      <Button x:Name="CoverageButton" Content="查看表情覆盖" Width="120" Margin="0,0,8,0" Padding="8,5" />
-      <Button x:Name="LogButton" Content="详细日志" Width="92" Padding="8,5" />
-      <Button x:Name="RestartButton" Content="重启电脑" Width="96" Margin="8,0,0,0" Padding="8,5" Visibility="Collapsed" IsEnabled="False" />
+    <StackPanel Grid.Row="0" Margin="2,0,2,14">
+      <TextBlock Text="苹果 Emoji 一键切换" FontSize="22" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" />
+      <TextBlock Text="替换或恢复 Windows 表情字体；系统变更会在需要时请求管理员授权。" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,3,0,0" TextWrapping="Wrap" />
     </StackPanel>
+    <ScrollViewer x:Name="MainScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,4,0">
+    <StackPanel>
+    <Border Style="{StaticResource CardStyle}">
+      <StackPanel>
+        <TextBlock Text="状态概览" Style="{StaticResource CardTitleStyle}" />
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="96" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Grid.Column="0" Text="操作系统" Style="{StaticResource FieldLabelStyle}" />
+          <TextBlock x:Name="OsText" Grid.Row="0" Grid.Column="1" Text="读取中…" Style="{StaticResource FieldValueStyle}" />
+          <TextBlock Grid.Row="1" Grid.Column="0" Text="当前字体" Style="{StaticResource FieldLabelStyle}" />
+          <TextBlock x:Name="FontText" Grid.Row="1" Grid.Column="1" Text="读取中…" Style="{StaticResource FieldValueStyle}" />
+          <TextBlock Grid.Row="2" Grid.Column="0" Text="目标版本" Style="{StaticResource FieldLabelStyle}" />
+          <TextBlock x:Name="VersionText" Grid.Row="2" Grid.Column="1" Text="读取中…" Style="{StaticResource FieldValueStyle}" />
+          <TextBlock Grid.Row="3" Grid.Column="0" Text="备份" Style="{StaticResource FieldLabelStyle}" />
+          <TextBlock x:Name="BackupText" Grid.Row="3" Grid.Column="1" Text="读取中…" Style="{StaticResource FieldValueStyle}" />
+        </Grid>
+      </StackPanel>
+    </Border>
+    <Border Style="{StaticResource CardStyle}">
+      <StackPanel>
+        <TextBlock Text="字体操作" Style="{StaticResource CardTitleStyle}" />
+        <WrapPanel>
+          <Button x:Name="ApplyButton" Content="一键替换" Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,10,8" />
+          <Button x:Name="RestoreButton" Content="恢复原生" Margin="0,0,10,8" />
+          <Button x:Name="CancelButton" Content="取消待重启操作" Margin="0,0,10,8" />
+          <Button x:Name="RestartButton" Content="重启电脑" Margin="0,0,0,8" Visibility="Collapsed" IsEnabled="False" />
+        </WrapPanel>
+      </StackPanel>
+    </Border>
+    <Border Style="{StaticResource CardStyle}">
+      <StackPanel>
+        <TextBlock Text="Win＋句号面板增强（独立扩展）" Style="{StaticResource CardTitleStyle}" />
+        <WrapPanel>
+          <Button x:Name="PanelEnableButton" Content="启用面板增强" Margin="0,0,10,8" />
+          <Button x:Name="PanelDisableButton" Content="停用面板增强" Margin="0,0,10,8" />
+          <Button x:Name="PanelStatusButton" Content="查看面板状态" Margin="0,0,0,8" />
+        </WrapPanel>
+        <TextBlock x:Name="PanelStatusText" Text="面板状态尚未读取；启用后仍需手工验收分类、搜索和点击输入。" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" Margin="0,2,0,0" />
+      </StackPanel>
+    </Border>
+    <Border Style="{StaticResource CardStyle}">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="进度与详情" Style="{StaticResource CardTitleStyle}" />
+        <Grid Grid.Row="1" Margin="0,0,0,8">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <ProgressBar x:Name="ProgressBar" Grid.Column="0" Height="8" Minimum="0" Maximum="100" Value="0" BorderThickness="0" Background="#E5E7EB" Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" />
+          <TextBlock x:Name="ProgressText" Grid.Column="1" MinWidth="110" MaxWidth="260" Margin="12,0,0,0" Text="就绪" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" VerticalAlignment="Center" />
+        </Grid>
+        <TextBox x:Name="StatusText" Grid.Row="2" Height="70" MinHeight="60" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" BorderBrush="{StaticResource CardBorderBrush}" Background="#FBFBFC" Padding="10,8" />
+      </Grid>
+    </Border>
+    </StackPanel>
+    </ScrollViewer>
+    <WrapPanel Grid.Row="2" HorizontalAlignment="Right" Margin="0,8,0,0">
+      <Button x:Name="CoverageButton" Content="查看表情覆盖" Margin="0,0,10,8" />
+      <Button x:Name="LogButton" Content="详细日志" Margin="0,0,0,8" />
+    </WrapPanel>
   </Grid>
 </Window>
 '@
@@ -1096,6 +1297,10 @@ function Start-AesUi {
     $coverageButton = $window.FindName('CoverageButton')
     $logButton = $window.FindName('LogButton')
     $restartButton = $window.FindName('RestartButton')
+    $panelEnableButton = $window.FindName('PanelEnableButton')
+    $panelDisableButton = $window.FindName('PanelDisableButton')
+    $panelStatusButton = $window.FindName('PanelStatusButton')
+    $script:PanelStatusTextControl = $window.FindName('PanelStatusText')
 
     $osText.Text = Get-AesOperatingSystemText
     $versionText.Text = Get-AesSourceVersionText
@@ -1231,6 +1436,9 @@ function Start-AesUi {
     $applyButton.Add_Click({ Start-AesUiWorker -ActionName 'Apply' })
     $restoreButton.Add_Click({ Start-AesUiWorker -ActionName 'Restore' })
     $cancelButton.Add_Click({ Start-AesUiWorker -ActionName 'Cancel' })
+    $panelEnableButton.Add_Click({ Start-AesPanelUiAction -Command 'enable' })
+    $panelDisableButton.Add_Click({ Start-AesPanelUiAction -Command 'disable' })
+    $panelStatusButton.Add_Click({ Start-AesPanelUiAction -Command 'status' })
     $coverageButton.Add_Click({
         try { Start-AesCoverageView }
         catch { $statusText.Text = '读取覆盖率失败：' + $_.Exception.Message }
@@ -1251,12 +1459,16 @@ function Start-AesUi {
     $timer.Interval = New-Object TimeSpan(0, 0, 0, 0, 500)
     $timer.Add_Tick({
         Update-AesUiStatusFile
+        Update-AesPanelUiAction
         if (([DateTime]::UtcNow - $script:LastUiStateRefresh).TotalSeconds -ge 2) {
             $script:LastUiStateRefresh = [DateTime]::UtcNow
             Update-AesUiState
         }
     })
-    $window.Add_Closed({ $timer.Stop() })
+    $window.Add_Closed({
+        $timer.Stop()
+        $script:PanelStatusTextControl = $null
+    })
     Update-AesUiState
     Update-AesUiStatusFile
     $timer.Start()

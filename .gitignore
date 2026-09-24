@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .build/
+.analysis/
 *.obj
 *.pdb
 *.ilk
@@ -18,3 +19,5 @@ validation/
 *.log
 .env
 .env.*
+bin/picker-data/
+bin/PanelController.LifecycleTest.exe

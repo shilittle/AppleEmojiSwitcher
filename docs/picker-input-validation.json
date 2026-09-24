@@ -1,0 +1,12 @@
+{
+  "date": "2026-09-20",
+  "application": "WinForms test input",
+  "method": "enhanced picker real button click via UI automation",
+  "sequence": [
+    "U+1FAEB"
+  ],
+  "expected": [
+    "U+1FAEB"
+  ],
+  "passed": true
+}

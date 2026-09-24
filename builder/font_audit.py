@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -19,6 +20,11 @@ class Entry:
     points: tuple[int, ...]
     name: str = ""
     qualification: str = ""
+    # Unicode's emoji-test comments carry the emoji age as ``E17.0``.  Keep
+    # the normalized numeric version here so callers can group entries without
+    # parsing the human-readable name.  It is last and optional to preserve
+    # the existing three-argument Entry(points, name, qualification) API.
+    age: str = ""
 
     @property
     def key(self) -> str:
@@ -31,6 +37,19 @@ class Entry:
     @property
     def is_text(self) -> bool:
         return 0xFE0E in self.points
+
+
+_EMOJI_AGE_RE = re.compile(r"(?<![A-Za-z0-9])E(?P<version>\d+(?:\.\d+)+)(?![A-Za-z0-9])")
+
+
+def parse_emoji_age(note: str) -> str:
+    """Return the normalized Unicode emoji age from a data-file comment.
+
+    The pinned ``emoji-test.txt`` uses comments such as ``E17.0``.  Other
+    pinned Unicode files may omit an age, so an empty string is a valid result.
+    """
+    match = _EMOJI_AGE_RE.search(note or "")
+    return match.group("version") if match else ""
 
 
 def unicode_entries(directory: Path) -> list[Entry]:
@@ -52,7 +71,15 @@ def unicode_entries(directory: Path) -> list[Entry]:
             else:
                 sequences = [tuple(int(cp, 16) for cp in points.split())]
             for sequence in sequences:
-                entries.setdefault(sequence, Entry(sequence, name, qualification))
+                candidate = Entry(sequence, name, qualification, parse_emoji_age(note))
+                existing = entries.get(sequence)
+                if existing is None:
+                    entries[sequence] = candidate
+                elif not existing.age and candidate.age:
+                    # emoji-test.txt is normally first, but retain the age if
+                    # a future pinned data-file ordering changes.
+                    entries[sequence] = Entry(existing.points, existing.name,
+                                              existing.qualification, candidate.age)
     return sorted(entries.values(), key=lambda entry: entry.points)
 
 

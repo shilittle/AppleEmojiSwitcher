@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "unicode": {
+    "version": "17.0",
+    "emojiTest": {
+      "url": "https://unicode.org/Public/17.0.0/emoji/emoji-test.txt",
+      "sha256": "1d8a944f88d7952f7ef7c5167fef3c67995bcae24543949710231b03a201acda",
+      "size": 669326
+    }
+  },
+  "cldr": {
+    "repository": "https://github.com/unicode-org/cldr-json",
+    "tag": "48.0.0",
+    "commit": "4d06be52b51bb2f75688d0abe55c52a66afed790",
+    "archiveUrl": "https://github.com/unicode-org/cldr-json/releases/download/48.0.0/cldr-48.0.0-json-full.zip",
+    "archiveSha256": "25ab2651a1a874dd62a727d3c213d7c6bf0fc269b09d2937f0499b82d99fa58e",
+    "files": {
+      "zh": {
+        "kind": "annotations",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-annotations-full/annotations/zh/annotations.json",
+        "sha256": "8d2dfe9bf41894bd17c9c1a1906a31bf0ccc06204bf4b77c2ab2b0d8f79a5fdf",
+        "size": 420265
+      },
+      "en": {
+        "kind": "annotations",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-annotations-full/annotations/en/annotations.json",
+        "sha256": "f22083cb86dffb63a643d5bacb5d9899f82d2fa5d388ad4f3aed72184acef505",
+        "size": 438314
+      },
+      "zh-derived": {
+        "kind": "annotationsDerived",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-annotations-derived-full/annotationsDerived/zh/annotations.json",
+        "sha256": "1ff96249af6fc69067f2dfabc26b450786a93d8048f2764ecfad53fd64953f92",
+        "size": 682370
+      },
+      "en-derived": {
+        "kind": "annotationsDerived",
+        "url": "https://raw.githubusercontent.com/unicode-org/cldr-json/48.0.0/cldr-json/cldr-annotations-derived-full/annotationsDerived/en/annotations.json",
+        "sha256": "15c9457afa703a32dcc78d54626418a91e820fe0ddd67b7d491c4c4d9f5846ab",
+        "size": 782906
+      }
+    }
+  }
+}

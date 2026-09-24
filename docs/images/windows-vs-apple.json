@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "image": {
+    "filename": "windows-vs-apple.png",
+    "sha256": "ed4cc6197b08ef8469b63b515e5ad91af5f3e95c2eec925cd03a8d0ee8b092b2"
+  },
+  "renderSizePx": 96,
+  "fonts": {
+    "Windows": {
+      "filename": "seguiemj.ttf",
+      "sha256": "12c5253251f45c57fa57e2a1c748f821d3ca030a3e757e049a5da6316f213bcb",
+      "version": "Version 1.51"
+    },
+    "Apple": {
+      "filename": "AppleColorEmoji-Windows.ttf",
+      "sha256": "18e48f1785564fbf511241e0963b265057bfe742036d8543406c6ce07e48ec0b",
+      "version": "Version 1.60",
+      "pinnedVersion": "macos-26-20260722-484daf4e"
+    }
+  },
+  "samples": [
+    {
+      "id": "face_tears",
+      "name": "喜极而泣",
+      "codepoints": [
+        "U+1F602"
+      ]
+    },
+    {
+      "id": "loudly_crying",
+      "name": "放声大哭",
+      "codepoints": [
+        "U+1F62D"
+      ]
+    },
+    {
+      "id": "pleading",
+      "name": "可怜脸",
+      "codepoints": [
+        "U+1F97A"
+      ]
+    },
+    {
+      "id": "heart_eyes",
+      "name": "爱心眼",
+      "codepoints": [
+        "U+1F60D"
+      ]
+    },
+    {
+      "id": "smirking",
+      "name": "得意脸",
+      "codepoints": [
+        "U+1F60F"
+      ]
+    },
+    {
+      "id": "upside_down",
+      "name": "倒脸",
+      "codepoints": [
+        "U+1F643"
+      ]
+    },
+    {
+      "id": "clown",
+      "name": "小丑",
+      "codepoints": [
+        "U+1F921"
+      ]
+    },
+    {
+      "id": "pile_of_poo",
+      "name": "便便",
+      "codepoints": [
+        "U+1F4A9"
+      ]
+    }
+  ]
+}
